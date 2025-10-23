@@ -4,8 +4,11 @@ import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import jakarta.servlet.http.HttpServletRequest;
 import net.shibboleth.idp.authn.AbstractAuthenticationAction;
+import net.shibboleth.idp.authn.AuthenticationResult;
 import net.shibboleth.idp.authn.context.AuthenticationContext;
 import net.shibboleth.idp.authn.context.UsernamePasswordContext;
+import net.shibboleth.idp.authn.principal.UsernamePrincipal;
+import org.opensaml.profile.action.AbstractProfileAction;
 import org.opensaml.profile.action.ActionSupport;
 import org.opensaml.profile.context.ProfileRequestContext;
 import org.slf4j.Logger;
@@ -23,7 +26,7 @@ import java.nio.charset.StandardCharsets;
  * This action calls an external risk-based authentication (RBA) service
  * and makes a decision based on the returned threat score.
  */
-public class RiskBasedAuthAction extends AbstractAuthenticationAction {
+public class RiskBasedAuthAction extends AbstractProfileAction {
 
     private final Logger log = LoggerFactory.getLogger(RiskBasedAuthAction.class);
     private String rbaEndpoint;
@@ -47,16 +50,25 @@ public class RiskBasedAuthAction extends AbstractAuthenticationAction {
     }
 
     @Override
-    protected void doExecute(@Nonnull final ProfileRequestContext profileRequestContext, @Nonnull final AuthenticationContext authenticationContext) {
+    protected void doExecute(@Nonnull final ProfileRequestContext profileRequestContext) {
+        final AuthenticationContext authenticationContext = profileRequestContext.getSubcontext(AuthenticationContext.class);
+        if (authenticationContext == null || authenticationContext.getAuthenticationResult() == null) {
+            log.error("AuthenticationContext or AuthenticationResult is not available.");
+            ActionSupport.buildEvent(profileRequestContext, "error");
+            return;
+        }
+
         final HttpServletRequest servletRequest = getHttpServletRequest();
+
         if (servletRequest == null) {
             log.error("HttpServletRequest is not available.");
             ActionSupport.buildEvent(profileRequestContext, "error");
             return;
         }
 
-        final UsernamePasswordContext upc = authenticationContext.getSubcontext(UsernamePasswordContext.class);
-        final String username = upc != null ? upc.getUsername() : null;
+        final AuthenticationResult authResult = authenticationContext.getAuthenticationResult();
+        final UsernamePrincipal userPrincipal = authResult.getSubject().getPrincipals(UsernamePrincipal.class).iterator().next();
+        final String username = userPrincipal != null ? userPrincipal.getName() : null;
         final String ipAddress = servletRequest.getRemoteAddr();
         final String userAgent = servletRequest.getHeader("User-Agent");
         final String transactionId = profileRequestContext.getLoggingId();
@@ -109,7 +121,7 @@ public class RiskBasedAuthAction extends AbstractAuthenticationAction {
      * Parses the JSON response from the RBA service and signals the outcome.
      *
      * @param profileRequestContext The context to signal events to.
-     * @param jsonResponse The JSON string from the Flask API.
+     * @param jsonResponse          The JSON string from the Flask API.
      */
     private void handleRbaResponse(ProfileRequestContext profileRequestContext, String jsonResponse) {
         try {

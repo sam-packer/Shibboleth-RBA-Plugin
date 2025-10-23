@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<flow xmlns="http://www.springframework.org/schema/webflow"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="http://www.springframework.org/schema/webflow http://www.springframework.org/schema/webflow/spring-webflow.xsd">
+
+    <bean-import resource="rba-beans.xml" />
+
+    <action-state id="CallRBAAction">
+        <evaluate expression="rbaAction" />
+        <transition on="proceed" to="proceed" />
+        <transition on="rbaDenied" to="rbaDenied" />
+        <transition on="error" to="error" />
+    </action-state>
+
+    <end-state id="proceed" />
+
+    <end-state id="rbaDenied" view="externalRedirect:contextRelative:/idp/profile/Error?eventId=AccessDenied" />
+
+    <end-state id="error" view="externalRedirect:contextRelative:/idp/profile/Error?eventId=RBAserviceError" />
+
+</flow>

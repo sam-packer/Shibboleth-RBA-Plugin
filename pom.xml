@@ -14,7 +14,6 @@
         <maven.compiler.target>17</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <idp.version>5.1.6</idp.version>
-        <java-shib-shared.version>9.1.6</java-shib-shared.version>
     </properties>
 
     <build>
