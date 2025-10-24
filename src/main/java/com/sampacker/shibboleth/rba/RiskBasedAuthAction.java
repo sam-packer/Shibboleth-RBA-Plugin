@@ -7,10 +7,8 @@ import jakarta.servlet.http.HttpServletRequest;
 import net.shibboleth.idp.authn.AuthenticationResult;
 import net.shibboleth.idp.authn.context.AuthenticationContext;
 import net.shibboleth.idp.authn.principal.UsernamePrincipal;
-import net.shibboleth.idp.profile.IdPEventIds;
 import net.shibboleth.shared.servlet.impl.HttpServletRequestResponseContext;
 import org.opensaml.profile.action.AbstractProfileAction;
-import org.opensaml.profile.action.ActionSupport;
 import org.opensaml.profile.action.EventIds;
 import org.opensaml.profile.context.EventContext;
 import org.opensaml.profile.context.ProfileRequestContext;
@@ -31,18 +29,19 @@ import java.util.Set;
  * Calls an external RBA service and decides based on "threatScore".
  */
 public class RiskBasedAuthAction extends AbstractProfileAction {
-
     private static final Gson GSON = new Gson();
+    private static final int CONNECT_TIMEOUT_MS = 5000;
+    private static final int READ_TIMEOUT_MS = 5000;
 
     private final Logger log = LoggerFactory.getLogger(RiskBasedAuthAction.class);
 
     /**
-     * e.g. https://rba.example.com/score
+     * e.g. https://rba.example.com/score (required)
      */
     private String rbaEndpoint;
 
     /**
-     * Local deny threshold (deny when threatScore >= failureThreshold).
+     * Deny when threatScore >= failureThreshold (required)
      */
     private double failureThreshold;
 
@@ -67,14 +66,19 @@ public class RiskBasedAuthAction extends AbstractProfileAction {
         final AuthenticationContext authnCtx = prc.getSubcontext(AuthenticationContext.class);
         if (authnCtx == null || authnCtx.getAuthenticationResult() == null) {
             log.error("AuthenticationContext or AuthenticationResult is not available.");
-            ActionSupport.buildEvent(prc, EventIds.RUNTIME_EXCEPTION);
+            emit(prc, EventIds.RUNTIME_EXCEPTION);
+            return;
+        }
+        if (rbaEndpoint == null || rbaEndpoint.isBlank()) {
+            log.error("rbaEndpoint is not configured.");
+            emit(prc, EventIds.RUNTIME_EXCEPTION);
             return;
         }
 
         final HttpServletRequest servletRequest = HttpServletRequestResponseContext.getRequest();
         if (servletRequest == null) {
             log.error("HttpServletRequest is not available.");
-            ActionSupport.buildEvent(prc, EventIds.RUNTIME_EXCEPTION);
+            emit(prc, EventIds.RUNTIME_EXCEPTION);
             return;
         }
 
@@ -82,15 +86,15 @@ public class RiskBasedAuthAction extends AbstractProfileAction {
         final Set<UsernamePrincipal> ups = result.getSubject().getPrincipals(UsernamePrincipal.class);
         final String username = ups.isEmpty() ? null : ups.iterator().next().getName();
 
-        final String ipAddress = servletRequest.getRemoteAddr();
-        final String userAgent = servletRequest.getHeader("User-Agent");
+        final String ipAddress = extractClientIp(servletRequest);
+        final String userAgent = sanitizeUserAgent(servletRequest.getHeader("User-Agent"));
 
         log.info("Starting RBA check for user='{}', ip='{}'", username, ipAddress);
 
         // Build payload
         final String payload = String.format(
                 "{\"username\":\"%s\",\"ipAddress\":\"%s\",\"userAgent\":\"%s\"}",
-                nullToEmpty(username), nullToEmpty(ipAddress), nullToEmpty(userAgent)
+                username, ipAddress, userAgent
         );
 
         HttpURLConnection conn = null;
@@ -101,11 +105,10 @@ public class RiskBasedAuthAction extends AbstractProfileAction {
             conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
             conn.setRequestProperty("Accept", "application/json");
             conn.setDoOutput(true);
-            conn.setConnectTimeout(5000);
-            conn.setReadTimeout(5000);
+            conn.setConnectTimeout(CONNECT_TIMEOUT_MS);
+            conn.setReadTimeout(READ_TIMEOUT_MS);
 
             log.debug("Sending payload to RBA service: {}", payload);
-
             try (OutputStream os = conn.getOutputStream()) {
                 os.write(payload.getBytes(StandardCharsets.UTF_8));
             }
@@ -118,7 +121,7 @@ public class RiskBasedAuthAction extends AbstractProfileAction {
 
             if (!ok) {
                 log.error("RBA service returned non-2xx status: {}", status);
-                ActionSupport.buildEvent(prc, EventIds.RUNTIME_EXCEPTION);
+                emit(prc, EventIds.RUNTIME_EXCEPTION);
                 return;
             }
 
@@ -126,39 +129,47 @@ public class RiskBasedAuthAction extends AbstractProfileAction {
             final JsonObject json = GSON.fromJson(body, JsonObject.class);
             if (json == null || !json.has("threatScore")) {
                 log.error("RBA response missing required 'threatScore'.");
-                ActionSupport.buildEvent(prc, EventIds.RUNTIME_EXCEPTION);
+                emit(prc, EventIds.RUNTIME_EXCEPTION);
                 return;
             }
 
             final double threatScore = json.get("threatScore").getAsDouble();
             if (!Double.isFinite(threatScore)) {
                 log.error("RBA 'threatScore' is not a finite number: {}", threatScore);
-                ActionSupport.buildEvent(prc, EventIds.RUNTIME_EXCEPTION);
+                emit(prc, EventIds.RUNTIME_EXCEPTION);
                 return;
             }
 
             log.info("RBA score={}, idpThreshold={}", threatScore, failureThreshold);
 
             if (threatScore < failureThreshold) {
-                final EventContext ec = prc.ensureSubcontext(EventContext.class);
-                ec.setEvent(EventIds.PROCEED_EVENT_ID);
+                emit(prc, EventIds.PROCEED_EVENT_ID); // "proceed"
             } else {
                 log.warn("Login denied by RBA: threatScore {} >= threshold {}", threatScore, failureThreshold);
-                final EventContext ec = prc.ensureSubcontext(EventContext.class);
-                ec.setEvent(EventIds.ACCESS_DENIED);
+                emit(prc, EventIds.ACCESS_DENIED);
             }
 
         } catch (JsonSyntaxException jse) {
             log.error("Invalid JSON from RBA service.", jse);
-            ActionSupport.buildEvent(prc, EventIds.RUNTIME_EXCEPTION);
+            emit(prc, EventIds.RUNTIME_EXCEPTION);
         } catch (Exception e) {
             log.error("Error calling RBA service at {}", rbaEndpoint, e);
-            ActionSupport.buildEvent(prc, EventIds.RUNTIME_EXCEPTION);
+            emit(prc, EventIds.RUNTIME_EXCEPTION);
         } finally {
             if (conn != null) {
                 conn.disconnect();
             }
         }
+    }
+
+    /**
+     * Helper to set an event and log it.
+     */
+    private void emit(ProfileRequestContext prc, String eventId) {
+        final EventContext ec = prc.ensureSubcontext(EventContext.class);
+        ec.setEvent(eventId);
+        final EventContext readback = prc.getSubcontext(EventContext.class);
+        log.info("RBA: emitting event='{}'", (readback != null ? readback.getEvent() : "<missing EventContext>"));
     }
 
     private static String readAll(InputStream is) throws Exception {
@@ -171,7 +182,24 @@ public class RiskBasedAuthAction extends AbstractProfileAction {
         }
     }
 
-    private static String nullToEmpty(String s) {
-        return (s == null) ? "" : s;
+    /**
+     * Pull client IP, preferring X-Forwarded-For safely (first non-empty token).
+     */
+    private static String extractClientIp(HttpServletRequest req) {
+        final String xff = req.getHeader("X-Forwarded-For");
+        if (xff != null && !xff.isBlank()) {
+            final String first = xff.split(",")[0].trim();
+            if (!first.isEmpty()) return first;
+        }
+        return req.getRemoteAddr();
+    }
+
+    /**
+     * Cap UA length to avoid log spam / oversized payloads.
+     */
+    private static String sanitizeUserAgent(String ua) {
+        if (ua == null) return "";
+        final int MAX = 512;
+        return ua.length() <= MAX ? ua : ua.substring(0, MAX);
     }
 }
