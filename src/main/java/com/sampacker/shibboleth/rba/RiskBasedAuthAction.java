@@ -3,15 +3,14 @@ package com.sampacker.shibboleth.rba;
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import jakarta.servlet.http.HttpServletRequest;
-import net.shibboleth.idp.authn.AbstractAuthenticationAction;
 import net.shibboleth.idp.authn.AuthenticationResult;
 import net.shibboleth.idp.authn.context.AuthenticationContext;
-import net.shibboleth.idp.authn.context.UsernamePasswordContext;
 import net.shibboleth.idp.authn.principal.UsernamePrincipal;
 import org.opensaml.profile.action.AbstractProfileAction;
 import org.opensaml.profile.action.ActionSupport;
 import org.opensaml.profile.context.ProfileRequestContext;
 import org.slf4j.Logger;
+import net.shibboleth.shared.servlet.impl.HttpServletRequestResponseContext;
 import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nonnull;
@@ -58,7 +57,10 @@ public class RiskBasedAuthAction extends AbstractProfileAction {
             return;
         }
 
-        final HttpServletRequest servletRequest = getHttpServletRequest();
+        final HttpServletRequest servletRequest =
+                HttpServletRequestResponseContext.getRequest() != null
+                        ? HttpServletRequestResponseContext.getRequest()
+                        : null;
 
         if (servletRequest == null) {
             log.error("HttpServletRequest is not available.");
@@ -71,7 +73,6 @@ public class RiskBasedAuthAction extends AbstractProfileAction {
         final String username = userPrincipal != null ? userPrincipal.getName() : null;
         final String ipAddress = servletRequest.getRemoteAddr();
         final String userAgent = servletRequest.getHeader("User-Agent");
-        final String transactionId = profileRequestContext.getLoggingId();
 
         log.info("Starting RBA check for user: {}, IP: {}", username, ipAddress);
 
@@ -87,8 +88,8 @@ public class RiskBasedAuthAction extends AbstractProfileAction {
 
             // Create JSON payload
             String jsonInputString = String.format(
-                    "{\"username\": \"%s\", \"ipAddress\": \"%s\", \"userAgent\": \"%s\", \"transactionId\": \"%s\"}",
-                    username, ipAddress, userAgent, transactionId
+                    "{\"username\": \"%s\", \"ipAddress\": \"%s\", \"userAgent\": \"%s\",}",
+                    username, ipAddress, userAgent
             );
 
             log.debug("Sending payload to RBA service: {}", jsonInputString);
@@ -120,29 +121,56 @@ public class RiskBasedAuthAction extends AbstractProfileAction {
     /**
      * Parses the JSON response from the RBA service and signals the outcome.
      *
-     * @param profileRequestContext The context to signal events to.
+     * @param prc                   The context to signal events to.
      * @param jsonResponse          The JSON string from the Flask API.
      */
-    private void handleRbaResponse(ProfileRequestContext profileRequestContext, String jsonResponse) {
+    private void handleRbaResponse(ProfileRequestContext prc, String jsonResponse) {
         try {
-            Gson gson = new Gson();
-            JsonObject jsonObject = gson.fromJson(jsonResponse, JsonObject.class);
+            JsonObject json = new Gson().fromJson(jsonResponse, JsonObject.class);
 
-            double threatScore = jsonObject.get("threatScore").getAsDouble();
-            String decision = jsonObject.get("decision").getAsString();
+            // Required
+            if (!json.has("threatScore")) {
+                log.error("RBA response missing 'threatScore'.");
+                ActionSupport.buildEvent(prc, "error");
+                return;
+            }
+            double threatScore = json.get("threatScore").getAsDouble();
 
-            log.info("RBA service decision: '{}' with score: {}", decision, threatScore);
+            // Optional API-provided threshold
+            Double apiThreshold = null;
+            if (json.has("threshold") && !json.get("threshold").isJsonNull()) {
+                try {
+                    apiThreshold = json.get("threshold").getAsDouble();
+                } catch (Exception e) {
+                    log.warn("RBA response 'threshold' not a number; ignoring.");
+                }
+            }
 
-            if ("allow".equalsIgnoreCase(decision) && threatScore < failureThreshold) {
-                log.info("Login allowed by RBA policy.");
-                ActionSupport.buildProceedEvent(profileRequestContext);
+            // Effective threshold = stricter (lower) of API threshold and IdP config
+            double effectiveThreshold = (apiThreshold != null)
+                    ? Math.min(failureThreshold, apiThreshold)
+                    : failureThreshold;
+
+            log.info("RBA score={}, idpThreshold={}, apiThreshold={}, effectiveThreshold={}",
+                    threatScore, failureThreshold, apiThreshold, effectiveThreshold);
+
+            if (Double.isNaN(threatScore)) {
+                log.error("Invalid threatScore (NaN).");
+                ActionSupport.buildEvent(prc, "error");
+                return;
+            }
+
+            if (threatScore < effectiveThreshold) {
+                // allow
+                ActionSupport.buildProceedEvent(prc);
             } else {
-                log.warn("Login denied by RBA policy. Threat score {} exceeded threshold {}.", threatScore, failureThreshold);
-                ActionSupport.buildEvent(profileRequestContext, "rbaDenied");
+                // deny with a friendly page (not InvalidEvent)
+                log.warn("Login denied: threatScore {} >= effectiveThreshold {}.", threatScore, effectiveThreshold);
+                ActionSupport.buildEvent(prc, "AccessDenied");
             }
         } catch (Exception e) {
-            log.error("Failed to parse JSON response from RBA service.", e);
-            ActionSupport.buildEvent(profileRequestContext, "error");
+            log.error("Failed to parse/handle RBA JSON.", e);
+            ActionSupport.buildEvent(prc, "error");
         }
     }
 }

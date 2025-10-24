@@ -62,6 +62,12 @@
             <scope>provided</scope>
         </dependency>
         <dependency>
+            <groupId>net.shibboleth</groupId>
+            <artifactId>shib-support</artifactId>
+            <version>9.1.6</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
             <groupId>net.shibboleth.idp</groupId>
             <artifactId>idp-session-api</artifactId>
             <version>${idp.version}</version>
