@@ -39,8 +39,7 @@ import static com.sampacker.shibboleth.rba.utils.StringHelper.*;
 /**
  * Calls an external RBA service with behavioral metrics and enforces access based on threatScore.
  */
-public class RiskBasedAuthAction extends AbstractProfileAction
-{
+public class RiskBasedAuthAction extends AbstractProfileAction {
 
     private static final Gson GSON = new GsonBuilder().serializeNulls().create();
     private static final int CONNECT_TIMEOUT_MS = 5000;
@@ -51,13 +50,11 @@ public class RiskBasedAuthAction extends AbstractProfileAction
     private String rbaEndpoint;
     private double failureThreshold;
 
-    public enum FieldType
-    {NUMBER, BOOLEAN, STRING}
+    public enum FieldType {NUMBER, BOOLEAN, STRING}
 
     public static final Map<String, FieldType> ALLOWED_FIELDS;
 
-    static
-    {
+    static {
         Map<String, FieldType> m = new LinkedHashMap<>();
         m.put("focus_changes", FieldType.NUMBER);
         m.put("blur_events", FieldType.NUMBER);
@@ -88,49 +85,42 @@ public class RiskBasedAuthAction extends AbstractProfileAction
         m.put("color_depth", FieldType.NUMBER);
         m.put("touch_support", FieldType.BOOLEAN);
         m.put("webauthn_supported", FieldType.BOOLEAN);
+        m.put("device_uuid", FieldType.STRING);
         ALLOWED_FIELDS = Collections.unmodifiableMap(m);
     }
 
-    public String getRbaEndpoint()
-    {
+    public String getRbaEndpoint() {
         return rbaEndpoint;
     }
 
-    public void setRbaEndpoint(String rbaEndpoint)
-    {
+    public void setRbaEndpoint(String rbaEndpoint) {
         this.rbaEndpoint = rbaEndpoint;
     }
 
-    public double getFailureThreshold()
-    {
+    public double getFailureThreshold() {
         return failureThreshold;
     }
 
-    public void setFailureThreshold(double failureThreshold)
-    {
+    public void setFailureThreshold(double failureThreshold) {
         this.failureThreshold = failureThreshold;
     }
 
     @Override
-    protected void doExecute(@Nonnull final ProfileRequestContext prc)
-    {
+    protected void doExecute(@Nonnull final ProfileRequestContext prc) {
         final AuthenticationContext authnCtx = prc.getSubcontext(AuthenticationContext.class);
-        if (authnCtx == null || authnCtx.getAuthenticationResult() == null)
-        {
+        if (authnCtx == null || authnCtx.getAuthenticationResult() == null) {
             log.error("AuthenticationContext or AuthenticationResult is not available.");
             emit(prc, EventIds.RUNTIME_EXCEPTION);
             return;
         }
-        if (rbaEndpoint == null || rbaEndpoint.isBlank())
-        {
+        if (rbaEndpoint == null || rbaEndpoint.isBlank()) {
             log.error("rbaEndpoint is not configured.");
             emit(prc, EventIds.RUNTIME_EXCEPTION);
             return;
         }
 
         final HttpServletRequest servletRequest = HttpServletRequestResponseContext.getRequest();
-        if (servletRequest == null)
-        {
+        if (servletRequest == null) {
             log.error("HttpServletRequest is not available.");
             emit(prc, EventIds.RUNTIME_EXCEPTION);
             return;
@@ -147,14 +137,13 @@ public class RiskBasedAuthAction extends AbstractProfileAction
 
         // Capture raw metrics string
         final String metricsRaw = servletRequest.getParameter("rbaMetricsField");
+        log.debug("rbaMetricsField raw={}", metricsRaw);
         JsonObject sanitizedMetrics = null;
-        if (metricsRaw != null && !metricsRaw.isBlank())
-        {
+        if (metricsRaw != null && !metricsRaw.isBlank()) {
             sanitizedMetrics = sanitizeAndValidateMetrics(metricsRaw);
-            if (sanitizedMetrics == null)
-            {
-                log.warn("Metrics were rejected or invalid; proceeding without metrics for user='{}'", username);
-            }
+        }
+        if (sanitizedMetrics == null) {
+            log.warn("Metrics were rejected or invalid; proceeding without metrics for user='{}'", username);
         }
 
         // Build payload
@@ -163,15 +152,13 @@ public class RiskBasedAuthAction extends AbstractProfileAction
         payload.addProperty("ipAddress", safeString(ipAddress));
         payload.addProperty("userAgent", safeString(userAgent));
 
-        if (sanitizedMetrics != null)
-        {
+        if (sanitizedMetrics != null) {
             payload.add("metrics", sanitizedMetrics);
         }
 
         // Send to RBA endpoint
         HttpURLConnection conn = null;
-        try
-        {
+        try {
             final URL url = new URL(rbaEndpoint);
             conn = (HttpURLConnection) url.openConnection();
             conn.setRequestMethod("POST");
@@ -183,11 +170,9 @@ public class RiskBasedAuthAction extends AbstractProfileAction
 
             final String jsonPayload = GSON.toJson(payload);
             log.debug("Sending payload to RBA service: {}", maskPayloadForLogs(jsonPayload));
-            try (OutputStream os = conn.getOutputStream())
-            {
+            try (OutputStream os = conn.getOutputStream()) {
                 byte[] bytes = jsonPayload.getBytes(StandardCharsets.UTF_8);
-                if (bytes.length > (64 * 1024))
-                {
+                if (bytes.length > (64 * 1024)) {
                     log.warn("Prepared RBA payload too large ({} bytes); aborting call.", bytes.length);
                     emit(prc, EventIds.RUNTIME_EXCEPTION);
                     return;
@@ -200,24 +185,21 @@ public class RiskBasedAuthAction extends AbstractProfileAction
             final String body = readAll(ok ? conn.getInputStream() : conn.getErrorStream());
             log.debug("RBA service HTTP {} body: {}", status, body);
 
-            if (!ok)
-            {
+            if (!ok) {
                 log.error("RBA service returned non-2xx status: {}", status);
                 emit(prc, EventIds.RUNTIME_EXCEPTION);
                 return;
             }
 
             final JsonObject json = GSON.fromJson(body, JsonObject.class);
-            if (json == null || !json.has("threatScore"))
-            {
+            if (json == null || !json.has("threatScore")) {
                 log.error("RBA response missing required 'threatScore'.");
                 emit(prc, EventIds.RUNTIME_EXCEPTION);
                 return;
             }
 
             final double threatScore = json.get("threatScore").getAsDouble();
-            if (!Double.isFinite(threatScore))
-            {
+            if (!Double.isFinite(threatScore)) {
                 log.error("RBA 'threatScore' is not a finite number: {}", threatScore);
                 emit(prc, EventIds.RUNTIME_EXCEPTION);
                 return;
@@ -225,38 +207,27 @@ public class RiskBasedAuthAction extends AbstractProfileAction
 
             log.info("RBA score={}, idpThreshold={}", threatScore, failureThreshold);
 
-            if (threatScore < failureThreshold)
-            {
+            if (threatScore < failureThreshold) {
                 emit(prc, EventIds.PROCEED_EVENT_ID);
-            }
-            else
-            {
+            } else {
                 log.warn("Login denied by RBA: threatScore {} >= threshold {}", threatScore, failureThreshold);
                 emit(prc, EventIds.ACCESS_DENIED);
             }
 
-        }
-        catch (JsonSyntaxException jse)
-        {
+        } catch (JsonSyntaxException jse) {
             log.error("Invalid JSON from RBA service.", jse);
             emit(prc, EventIds.RUNTIME_EXCEPTION);
-        }
-        catch (Exception e)
-        {
+        } catch (Exception e) {
             log.error("Error calling RBA service at {}", rbaEndpoint, e);
             emit(prc, EventIds.RUNTIME_EXCEPTION);
-        }
-        finally
-        {
-            if (conn != null)
-            {
+        } finally {
+            if (conn != null) {
                 conn.disconnect();
             }
         }
     }
 
-    public void emit(ProfileRequestContext prc, String eventId)
-    {
+    public void emit(ProfileRequestContext prc, String eventId) {
         final EventContext ec = prc.ensureSubcontext(EventContext.class);
         ec.setEvent(eventId);
         final EventContext readback = prc.getSubcontext(EventContext.class);
