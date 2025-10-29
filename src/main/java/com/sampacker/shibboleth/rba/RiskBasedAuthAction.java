@@ -32,6 +32,8 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 
 import static com.sampacker.shibboleth.rba.utils.JsonHelper.sanitizeAndValidateMetrics;
 import static com.sampacker.shibboleth.rba.utils.StringHelper.*;
@@ -44,6 +46,9 @@ public class RiskBasedAuthAction extends AbstractProfileAction {
     private static final Gson GSON = new GsonBuilder().serializeNulls().create();
     private static final int CONNECT_TIMEOUT_MS = 5000;
     private static final int READ_TIMEOUT_MS = 5000;
+
+    private static final ConcurrentHashMap<String, Long> DENIED_USERS = new ConcurrentHashMap<>();
+    private static final long DENIAL_TIMEOUT_MS = TimeUnit.HOURS.toMillis(1);
 
     private final Logger log = LoggerFactory.getLogger(RiskBasedAuthAction.class);
 
@@ -113,6 +118,7 @@ public class RiskBasedAuthAction extends AbstractProfileAction {
             emit(prc, EventIds.RUNTIME_EXCEPTION);
             return;
         }
+
         if (rbaEndpoint == null || rbaEndpoint.isBlank()) {
             log.error("rbaEndpoint is not configured.");
             emit(prc, EventIds.RUNTIME_EXCEPTION);
@@ -138,12 +144,38 @@ public class RiskBasedAuthAction extends AbstractProfileAction {
         // Capture raw metrics string
         final String metricsRaw = servletRequest.getParameter("rbaMetricsField");
         log.debug("rbaMetricsField raw={}", metricsRaw);
-        JsonObject sanitizedMetrics = null;
-        if (metricsRaw != null && !metricsRaw.isBlank()) {
-            sanitizedMetrics = sanitizeAndValidateMetrics(metricsRaw);
+
+        // Check if metrics are null (SSO attempt)
+        if (metricsRaw == null || metricsRaw.isBlank()) {
+            // Check if this user was previously denied
+            Long denialTime = DENIED_USERS.get(username);
+            if (denialTime != null) {
+                long timeSinceDenial = System.currentTimeMillis() - denialTime;
+                if (timeSinceDenial < DENIAL_TIMEOUT_MS) {
+                    log.warn("RBA: SSO attempt by previously denied user '{}' (denied {}ms ago) - BLOCKING",
+                            username, timeSinceDenial);
+                    emit(prc, EventIds.ACCESS_DENIED);
+                    return;
+                } else {
+                    // Timeout expired, remove from denied list
+                    DENIED_USERS.remove(username);
+                    log.info("RBA: Denial timeout expired for user '{}', allowing SSO", username);
+                }
+            }
+
+            // User not in denied list - allow SSO
+            log.info("RBA: SSO attempt by user '{}' who is not in denied list - ALLOWING", username);
+            emit(prc, EventIds.PROCEED_EVENT_ID);
+            return;
         }
+
+        // Metrics present - this is a fresh login, perform full RBA check
+        JsonObject sanitizedMetrics = sanitizeAndValidateMetrics(metricsRaw);
         if (sanitizedMetrics == null) {
-            log.warn("Metrics were rejected or invalid; proceeding without metrics for user='{}'", username);
+            log.warn("Metrics were rejected or invalid; denying access for user='{}'", username);
+            DENIED_USERS.put(username, System.currentTimeMillis());
+            emit(prc, EventIds.ACCESS_DENIED);
+            return;
         }
 
         // Build payload
@@ -151,10 +183,7 @@ public class RiskBasedAuthAction extends AbstractProfileAction {
         payload.addProperty("username", safeString(username));
         payload.addProperty("ipAddress", safeString(ipAddress));
         payload.addProperty("userAgent", safeString(userAgent));
-
-        if (sanitizedMetrics != null) {
-            payload.add("metrics", sanitizedMetrics);
-        }
+        payload.add("metrics", sanitizedMetrics);
 
         // Send to RBA endpoint
         HttpURLConnection conn = null;
@@ -208,9 +237,15 @@ public class RiskBasedAuthAction extends AbstractProfileAction {
             log.info("RBA score={}, idpThreshold={}", threatScore, failureThreshold);
 
             if (threatScore < failureThreshold) {
+                // User passed RBA - remove from denied list if present
+                DENIED_USERS.remove(username);
+                log.info("RBA: User '{}' passed RBA check - ALLOWING", username);
                 emit(prc, EventIds.PROCEED_EVENT_ID);
             } else {
-                log.warn("Login denied by RBA: threatScore {} >= threshold {}", threatScore, failureThreshold);
+                // User failed RBA - add to denied list
+                DENIED_USERS.put(username, System.currentTimeMillis());
+                log.warn("Login denied by RBA: threatScore {} >= threshold {}. User '{}' blocked for {}ms",
+                        threatScore, failureThreshold, username, DENIAL_TIMEOUT_MS);
                 emit(prc, EventIds.ACCESS_DENIED);
             }
 
