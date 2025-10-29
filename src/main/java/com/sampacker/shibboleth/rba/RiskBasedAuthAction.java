@@ -13,9 +13,7 @@
 
 package com.sampacker.shibboleth.rba;
 
-import com.google.gson.Gson;
-import com.google.gson.JsonObject;
-import com.google.gson.JsonSyntaxException;
+import com.google.gson.*;
 import jakarta.servlet.http.HttpServletRequest;
 import net.shibboleth.idp.authn.AuthenticationResult;
 import net.shibboleth.idp.authn.context.AuthenticationContext;
@@ -29,67 +27,110 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nonnull;
-import java.io.BufferedReader;
-import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.io.OutputStream;
+import java.io.*;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
-import java.util.Set;
+import java.util.*;
+
+import static com.sampacker.shibboleth.rba.utils.JsonHelper.sanitizeAndValidateMetrics;
+import static com.sampacker.shibboleth.rba.utils.StringHelper.*;
 
 /**
- * Calls an external RBA service and decides based on "threatScore".
+ * Calls an external RBA service with behavioral metrics and enforces access based on threatScore.
  */
-public class RiskBasedAuthAction extends AbstractProfileAction {
-    private static final Gson GSON = new Gson();
+public class RiskBasedAuthAction extends AbstractProfileAction
+{
+
+    private static final Gson GSON = new GsonBuilder().serializeNulls().create();
     private static final int CONNECT_TIMEOUT_MS = 5000;
     private static final int READ_TIMEOUT_MS = 5000;
 
     private final Logger log = LoggerFactory.getLogger(RiskBasedAuthAction.class);
 
-    /**
-     * e.g. https://rba.example.com/score (required)
-     */
     private String rbaEndpoint;
-
-    /**
-     * Deny when threatScore >= failureThreshold (required)
-     */
     private double failureThreshold;
 
-    public String getRbaEndpoint() {
+    public enum FieldType
+    {NUMBER, BOOLEAN, STRING}
+
+    public static final Map<String, FieldType> ALLOWED_FIELDS;
+
+    static
+    {
+        Map<String, FieldType> m = new LinkedHashMap<>();
+        m.put("focus_changes", FieldType.NUMBER);
+        m.put("blur_events", FieldType.NUMBER);
+        m.put("click_count", FieldType.NUMBER);
+        m.put("key_count", FieldType.NUMBER);
+        m.put("avg_key_delay_ms", FieldType.NUMBER);
+        m.put("pointer_distance_px", FieldType.NUMBER);
+        m.put("pointer_event_count", FieldType.NUMBER);
+        m.put("scroll_distance_px", FieldType.NUMBER);
+        m.put("scroll_event_count", FieldType.NUMBER);
+        m.put("dom_ready_ms", FieldType.NUMBER);
+        m.put("time_to_first_key_ms", FieldType.NUMBER);
+        m.put("time_to_first_click_ms", FieldType.NUMBER);
+        m.put("idle_time_total_ms", FieldType.NUMBER);
+        m.put("input_focus_count", FieldType.NUMBER);
+        m.put("paste_events", FieldType.NUMBER);
+        m.put("resize_events", FieldType.NUMBER);
+        m.put("metrics_version", FieldType.NUMBER);
+        m.put("collection_timestamp", FieldType.STRING);
+        m.put("tz_offset_min", FieldType.NUMBER);
+        m.put("language", FieldType.STRING);
+        m.put("platform", FieldType.STRING);
+        m.put("device_memory_gb", FieldType.NUMBER);
+        m.put("hardware_concurrency", FieldType.NUMBER);
+        m.put("screen_width_px", FieldType.NUMBER);
+        m.put("screen_height_px", FieldType.NUMBER);
+        m.put("pixel_ratio", FieldType.NUMBER);
+        m.put("color_depth", FieldType.NUMBER);
+        m.put("touch_support", FieldType.BOOLEAN);
+        m.put("webauthn_supported", FieldType.BOOLEAN);
+        ALLOWED_FIELDS = Collections.unmodifiableMap(m);
+    }
+
+    public String getRbaEndpoint()
+    {
         return rbaEndpoint;
     }
 
-    public void setRbaEndpoint(String rbaEndpoint) {
+    public void setRbaEndpoint(String rbaEndpoint)
+    {
         this.rbaEndpoint = rbaEndpoint;
     }
 
-    public double getFailureThreshold() {
+    public double getFailureThreshold()
+    {
         return failureThreshold;
     }
 
-    public void setFailureThreshold(double failureThreshold) {
+    public void setFailureThreshold(double failureThreshold)
+    {
         this.failureThreshold = failureThreshold;
     }
 
     @Override
-    protected void doExecute(@Nonnull final ProfileRequestContext prc) {
+    protected void doExecute(@Nonnull final ProfileRequestContext prc)
+    {
         final AuthenticationContext authnCtx = prc.getSubcontext(AuthenticationContext.class);
-        if (authnCtx == null || authnCtx.getAuthenticationResult() == null) {
+        if (authnCtx == null || authnCtx.getAuthenticationResult() == null)
+        {
             log.error("AuthenticationContext or AuthenticationResult is not available.");
             emit(prc, EventIds.RUNTIME_EXCEPTION);
             return;
         }
-        if (rbaEndpoint == null || rbaEndpoint.isBlank()) {
+        if (rbaEndpoint == null || rbaEndpoint.isBlank())
+        {
             log.error("rbaEndpoint is not configured.");
             emit(prc, EventIds.RUNTIME_EXCEPTION);
             return;
         }
 
         final HttpServletRequest servletRequest = HttpServletRequestResponseContext.getRequest();
-        if (servletRequest == null) {
+        if (servletRequest == null)
+        {
             log.error("HttpServletRequest is not available.");
             emit(prc, EventIds.RUNTIME_EXCEPTION);
             return;
@@ -100,18 +141,37 @@ public class RiskBasedAuthAction extends AbstractProfileAction {
         final String username = ups.isEmpty() ? null : ups.iterator().next().getName();
 
         final String ipAddress = extractClientIp(servletRequest);
-        final String userAgent = sanitizeUserAgent(servletRequest.getHeader("User-Agent"));
+        final String userAgent = safeString(servletRequest.getHeader("User-Agent"));
 
         log.info("Starting RBA check for user='{}', ip='{}'", username, ipAddress);
 
-        // Build payload
-        final String payload = String.format(
-                "{\"username\":\"%s\",\"ipAddress\":\"%s\",\"userAgent\":\"%s\"}",
-                username, ipAddress, userAgent
-        );
+        // Capture raw metrics string
+        final String metricsRaw = servletRequest.getParameter("rbaMetricsField");
+        JsonObject sanitizedMetrics = null;
+        if (metricsRaw != null && !metricsRaw.isBlank())
+        {
+            sanitizedMetrics = sanitizeAndValidateMetrics(metricsRaw);
+            if (sanitizedMetrics == null)
+            {
+                log.warn("Metrics were rejected or invalid; proceeding without metrics for user='{}'", username);
+            }
+        }
 
+        // Build payload
+        final JsonObject payload = new JsonObject();
+        payload.addProperty("username", safeString(username));
+        payload.addProperty("ipAddress", safeString(ipAddress));
+        payload.addProperty("userAgent", safeString(userAgent));
+
+        if (sanitizedMetrics != null)
+        {
+            payload.add("metrics", sanitizedMetrics);
+        }
+
+        // Send to RBA endpoint
         HttpURLConnection conn = null;
-        try {
+        try
+        {
             final URL url = new URL(rbaEndpoint);
             conn = (HttpURLConnection) url.openConnection();
             conn.setRequestMethod("POST");
@@ -121,33 +181,43 @@ public class RiskBasedAuthAction extends AbstractProfileAction {
             conn.setConnectTimeout(CONNECT_TIMEOUT_MS);
             conn.setReadTimeout(READ_TIMEOUT_MS);
 
-            log.debug("Sending payload to RBA service: {}", payload);
-            try (OutputStream os = conn.getOutputStream()) {
-                os.write(payload.getBytes(StandardCharsets.UTF_8));
+            final String jsonPayload = GSON.toJson(payload);
+            log.debug("Sending payload to RBA service: {}", maskPayloadForLogs(jsonPayload));
+            try (OutputStream os = conn.getOutputStream())
+            {
+                byte[] bytes = jsonPayload.getBytes(StandardCharsets.UTF_8);
+                if (bytes.length > (64 * 1024))
+                {
+                    log.warn("Prepared RBA payload too large ({} bytes); aborting call.", bytes.length);
+                    emit(prc, EventIds.RUNTIME_EXCEPTION);
+                    return;
+                }
+                os.write(bytes);
             }
 
             final int status = conn.getResponseCode();
             final boolean ok = status >= 200 && status < 300;
-
             final String body = readAll(ok ? conn.getInputStream() : conn.getErrorStream());
             log.debug("RBA service HTTP {} body: {}", status, body);
 
-            if (!ok) {
+            if (!ok)
+            {
                 log.error("RBA service returned non-2xx status: {}", status);
                 emit(prc, EventIds.RUNTIME_EXCEPTION);
                 return;
             }
 
-            // Parse JSON and extract threatScore
             final JsonObject json = GSON.fromJson(body, JsonObject.class);
-            if (json == null || !json.has("threatScore")) {
+            if (json == null || !json.has("threatScore"))
+            {
                 log.error("RBA response missing required 'threatScore'.");
                 emit(prc, EventIds.RUNTIME_EXCEPTION);
                 return;
             }
 
             final double threatScore = json.get("threatScore").getAsDouble();
-            if (!Double.isFinite(threatScore)) {
+            if (!Double.isFinite(threatScore))
+            {
                 log.error("RBA 'threatScore' is not a finite number: {}", threatScore);
                 emit(prc, EventIds.RUNTIME_EXCEPTION);
                 return;
@@ -155,64 +225,41 @@ public class RiskBasedAuthAction extends AbstractProfileAction {
 
             log.info("RBA score={}, idpThreshold={}", threatScore, failureThreshold);
 
-            if (threatScore < failureThreshold) {
-                emit(prc, EventIds.PROCEED_EVENT_ID); // "proceed"
-            } else {
+            if (threatScore < failureThreshold)
+            {
+                emit(prc, EventIds.PROCEED_EVENT_ID);
+            }
+            else
+            {
                 log.warn("Login denied by RBA: threatScore {} >= threshold {}", threatScore, failureThreshold);
                 emit(prc, EventIds.ACCESS_DENIED);
             }
 
-        } catch (JsonSyntaxException jse) {
+        }
+        catch (JsonSyntaxException jse)
+        {
             log.error("Invalid JSON from RBA service.", jse);
             emit(prc, EventIds.RUNTIME_EXCEPTION);
-        } catch (Exception e) {
+        }
+        catch (Exception e)
+        {
             log.error("Error calling RBA service at {}", rbaEndpoint, e);
             emit(prc, EventIds.RUNTIME_EXCEPTION);
-        } finally {
-            if (conn != null) {
+        }
+        finally
+        {
+            if (conn != null)
+            {
                 conn.disconnect();
             }
         }
     }
 
-    /**
-     * Helper to set an event and log it.
-     */
-    private void emit(ProfileRequestContext prc, String eventId) {
+    public void emit(ProfileRequestContext prc, String eventId)
+    {
         final EventContext ec = prc.ensureSubcontext(EventContext.class);
         ec.setEvent(eventId);
         final EventContext readback = prc.getSubcontext(EventContext.class);
         log.info("RBA: emitting event='{}'", (readback != null ? readback.getEvent() : "<missing EventContext>"));
-    }
-
-    private static String readAll(InputStream is) throws Exception {
-        if (is == null) return "";
-        try (BufferedReader br = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8))) {
-            final StringBuilder sb = new StringBuilder();
-            String line;
-            while ((line = br.readLine()) != null) sb.append(line);
-            return sb.toString();
-        }
-    }
-
-    /**
-     * Pull client IP, preferring X-Forwarded-For safely (first non-empty token).
-     */
-    private static String extractClientIp(HttpServletRequest req) {
-        final String xff = req.getHeader("X-Forwarded-For");
-        if (xff != null && !xff.isBlank()) {
-            final String first = xff.split(",")[0].trim();
-            if (!first.isEmpty()) return first;
-        }
-        return req.getRemoteAddr();
-    }
-
-    /**
-     * Cap UA length to avoid log spam / oversized payloads.
-     */
-    private static String sanitizeUserAgent(String ua) {
-        if (ua == null) return "";
-        final int MAX = 512;
-        return ua.length() <= MAX ? ua : ua.substring(0, MAX);
     }
 }
