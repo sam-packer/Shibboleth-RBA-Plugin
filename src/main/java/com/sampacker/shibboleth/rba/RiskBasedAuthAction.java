@@ -13,9 +13,7 @@
 
 package com.sampacker.shibboleth.rba;
 
-import com.google.gson.Gson;
-import com.google.gson.JsonObject;
-import com.google.gson.JsonSyntaxException;
+import com.google.gson.*;
 import jakarta.servlet.http.HttpServletRequest;
 import net.shibboleth.idp.authn.AuthenticationResult;
 import net.shibboleth.idp.authn.context.AuthenticationContext;
@@ -29,34 +27,72 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nonnull;
-import java.io.BufferedReader;
-import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.io.OutputStream;
+import java.io.*;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
-import java.util.Set;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+
+import static com.sampacker.shibboleth.rba.utils.JsonHelper.sanitizeAndValidateMetrics;
+import static com.sampacker.shibboleth.rba.utils.StringHelper.*;
 
 /**
- * Calls an external RBA service and decides based on "threatScore".
+ * Calls an external RBA service with behavioral metrics and enforces access based on threatScore.
  */
 public class RiskBasedAuthAction extends AbstractProfileAction {
-    private static final Gson GSON = new Gson();
+
+    private static final Gson GSON = new GsonBuilder().serializeNulls().create();
     private static final int CONNECT_TIMEOUT_MS = 5000;
     private static final int READ_TIMEOUT_MS = 5000;
 
+    private static final ConcurrentHashMap<String, Long> DENIED_USERS = new ConcurrentHashMap<>();
+    private static final long DENIAL_TIMEOUT_MS = TimeUnit.HOURS.toMillis(1);
+
     private final Logger log = LoggerFactory.getLogger(RiskBasedAuthAction.class);
 
-    /**
-     * e.g. https://rba.example.com/score (required)
-     */
     private String rbaEndpoint;
-
-    /**
-     * Deny when threatScore >= failureThreshold (required)
-     */
     private double failureThreshold;
+
+    public enum FieldType {NUMBER, BOOLEAN, STRING}
+
+    public static final Map<String, FieldType> ALLOWED_FIELDS;
+
+    static {
+        Map<String, FieldType> m = new LinkedHashMap<>();
+        m.put("focus_changes", FieldType.NUMBER);
+        m.put("blur_events", FieldType.NUMBER);
+        m.put("click_count", FieldType.NUMBER);
+        m.put("key_count", FieldType.NUMBER);
+        m.put("avg_key_delay_ms", FieldType.NUMBER);
+        m.put("pointer_distance_px", FieldType.NUMBER);
+        m.put("pointer_event_count", FieldType.NUMBER);
+        m.put("scroll_distance_px", FieldType.NUMBER);
+        m.put("scroll_event_count", FieldType.NUMBER);
+        m.put("dom_ready_ms", FieldType.NUMBER);
+        m.put("time_to_first_key_ms", FieldType.NUMBER);
+        m.put("time_to_first_click_ms", FieldType.NUMBER);
+        m.put("idle_time_total_ms", FieldType.NUMBER);
+        m.put("input_focus_count", FieldType.NUMBER);
+        m.put("paste_events", FieldType.NUMBER);
+        m.put("resize_events", FieldType.NUMBER);
+        m.put("metrics_version", FieldType.NUMBER);
+        m.put("collection_timestamp", FieldType.STRING);
+        m.put("tz_offset_min", FieldType.NUMBER);
+        m.put("language", FieldType.STRING);
+        m.put("platform", FieldType.STRING);
+        m.put("device_memory_gb", FieldType.NUMBER);
+        m.put("hardware_concurrency", FieldType.NUMBER);
+        m.put("screen_width_px", FieldType.NUMBER);
+        m.put("screen_height_px", FieldType.NUMBER);
+        m.put("pixel_ratio", FieldType.NUMBER);
+        m.put("color_depth", FieldType.NUMBER);
+        m.put("touch_support", FieldType.BOOLEAN);
+        m.put("webauthn_supported", FieldType.BOOLEAN);
+        m.put("device_uuid", FieldType.STRING);
+        ALLOWED_FIELDS = Collections.unmodifiableMap(m);
+    }
 
     public String getRbaEndpoint() {
         return rbaEndpoint;
@@ -82,6 +118,7 @@ public class RiskBasedAuthAction extends AbstractProfileAction {
             emit(prc, EventIds.RUNTIME_EXCEPTION);
             return;
         }
+
         if (rbaEndpoint == null || rbaEndpoint.isBlank()) {
             log.error("rbaEndpoint is not configured.");
             emit(prc, EventIds.RUNTIME_EXCEPTION);
@@ -100,16 +137,55 @@ public class RiskBasedAuthAction extends AbstractProfileAction {
         final String username = ups.isEmpty() ? null : ups.iterator().next().getName();
 
         final String ipAddress = extractClientIp(servletRequest);
-        final String userAgent = sanitizeUserAgent(servletRequest.getHeader("User-Agent"));
+        final String userAgent = safeString(servletRequest.getHeader("User-Agent"));
 
         log.info("Starting RBA check for user='{}', ip='{}'", username, ipAddress);
 
-        // Build payload
-        final String payload = String.format(
-                "{\"username\":\"%s\",\"ipAddress\":\"%s\",\"userAgent\":\"%s\"}",
-                username, ipAddress, userAgent
-        );
+        // Capture raw metrics string
+        final String metricsRaw = servletRequest.getParameter("rbaMetricsField");
+        log.debug("rbaMetricsField raw={}", metricsRaw);
 
+        // Check if metrics are null (SSO attempt)
+        if (metricsRaw == null || metricsRaw.isBlank()) {
+            // Check if this user was previously denied
+            Long denialTime = DENIED_USERS.get(username);
+            if (denialTime != null) {
+                long timeSinceDenial = System.currentTimeMillis() - denialTime;
+                if (timeSinceDenial < DENIAL_TIMEOUT_MS) {
+                    log.warn("RBA: SSO attempt by previously denied user '{}' (denied {}ms ago) - BLOCKING",
+                            username, timeSinceDenial);
+                    emit(prc, EventIds.ACCESS_DENIED);
+                    return;
+                } else {
+                    // Timeout expired, remove from denied list
+                    DENIED_USERS.remove(username);
+                    log.info("RBA: Denial timeout expired for user '{}', allowing SSO", username);
+                }
+            }
+
+            // User not in denied list - allow SSO
+            log.info("RBA: SSO attempt by user '{}' who is not in denied list - ALLOWING", username);
+            emit(prc, EventIds.PROCEED_EVENT_ID);
+            return;
+        }
+
+        // Metrics present - this is a fresh login, perform full RBA check
+        JsonObject sanitizedMetrics = sanitizeAndValidateMetrics(metricsRaw);
+        if (sanitizedMetrics == null) {
+            log.warn("Metrics were rejected or invalid; denying access for user='{}'", username);
+            DENIED_USERS.put(username, System.currentTimeMillis());
+            emit(prc, EventIds.ACCESS_DENIED);
+            return;
+        }
+
+        // Build payload
+        final JsonObject payload = new JsonObject();
+        payload.addProperty("username", safeString(username));
+        payload.addProperty("ipAddress", safeString(ipAddress));
+        payload.addProperty("userAgent", safeString(userAgent));
+        payload.add("metrics", sanitizedMetrics);
+
+        // Send to RBA endpoint
         HttpURLConnection conn = null;
         try {
             final URL url = new URL(rbaEndpoint);
@@ -121,14 +197,20 @@ public class RiskBasedAuthAction extends AbstractProfileAction {
             conn.setConnectTimeout(CONNECT_TIMEOUT_MS);
             conn.setReadTimeout(READ_TIMEOUT_MS);
 
-            log.debug("Sending payload to RBA service: {}", payload);
+            final String jsonPayload = GSON.toJson(payload);
+            log.debug("Sending payload to RBA service: {}", maskPayloadForLogs(jsonPayload));
             try (OutputStream os = conn.getOutputStream()) {
-                os.write(payload.getBytes(StandardCharsets.UTF_8));
+                byte[] bytes = jsonPayload.getBytes(StandardCharsets.UTF_8);
+                if (bytes.length > (64 * 1024)) {
+                    log.warn("Prepared RBA payload too large ({} bytes); aborting call.", bytes.length);
+                    emit(prc, EventIds.RUNTIME_EXCEPTION);
+                    return;
+                }
+                os.write(bytes);
             }
 
             final int status = conn.getResponseCode();
             final boolean ok = status >= 200 && status < 300;
-
             final String body = readAll(ok ? conn.getInputStream() : conn.getErrorStream());
             log.debug("RBA service HTTP {} body: {}", status, body);
 
@@ -138,7 +220,6 @@ public class RiskBasedAuthAction extends AbstractProfileAction {
                 return;
             }
 
-            // Parse JSON and extract threatScore
             final JsonObject json = GSON.fromJson(body, JsonObject.class);
             if (json == null || !json.has("threatScore")) {
                 log.error("RBA response missing required 'threatScore'.");
@@ -156,9 +237,15 @@ public class RiskBasedAuthAction extends AbstractProfileAction {
             log.info("RBA score={}, idpThreshold={}", threatScore, failureThreshold);
 
             if (threatScore < failureThreshold) {
-                emit(prc, EventIds.PROCEED_EVENT_ID); // "proceed"
+                // User passed RBA - remove from denied list if present
+                DENIED_USERS.remove(username);
+                log.info("RBA: User '{}' passed RBA check - ALLOWING", username);
+                emit(prc, EventIds.PROCEED_EVENT_ID);
             } else {
-                log.warn("Login denied by RBA: threatScore {} >= threshold {}", threatScore, failureThreshold);
+                // User failed RBA - add to denied list
+                DENIED_USERS.put(username, System.currentTimeMillis());
+                log.warn("Login denied by RBA: threatScore {} >= threshold {}. User '{}' blocked for {}ms",
+                        threatScore, failureThreshold, username, DENIAL_TIMEOUT_MS);
                 emit(prc, EventIds.ACCESS_DENIED);
             }
 
@@ -175,44 +262,10 @@ public class RiskBasedAuthAction extends AbstractProfileAction {
         }
     }
 
-    /**
-     * Helper to set an event and log it.
-     */
-    private void emit(ProfileRequestContext prc, String eventId) {
+    public void emit(ProfileRequestContext prc, String eventId) {
         final EventContext ec = prc.ensureSubcontext(EventContext.class);
         ec.setEvent(eventId);
         final EventContext readback = prc.getSubcontext(EventContext.class);
         log.info("RBA: emitting event='{}'", (readback != null ? readback.getEvent() : "<missing EventContext>"));
-    }
-
-    private static String readAll(InputStream is) throws Exception {
-        if (is == null) return "";
-        try (BufferedReader br = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8))) {
-            final StringBuilder sb = new StringBuilder();
-            String line;
-            while ((line = br.readLine()) != null) sb.append(line);
-            return sb.toString();
-        }
-    }
-
-    /**
-     * Pull client IP, preferring X-Forwarded-For safely (first non-empty token).
-     */
-    private static String extractClientIp(HttpServletRequest req) {
-        final String xff = req.getHeader("X-Forwarded-For");
-        if (xff != null && !xff.isBlank()) {
-            final String first = xff.split(",")[0].trim();
-            if (!first.isEmpty()) return first;
-        }
-        return req.getRemoteAddr();
-    }
-
-    /**
-     * Cap UA length to avoid log spam / oversized payloads.
-     */
-    private static String sanitizeUserAgent(String ua) {
-        if (ua == null) return "";
-        final int MAX = 512;
-        return ua.length() <= MAX ? ua : ua.substring(0, MAX);
     }
 }
