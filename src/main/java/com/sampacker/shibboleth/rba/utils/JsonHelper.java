@@ -126,6 +126,8 @@ public class JsonHelper
                             case "time_to_first_key_ms":
                             case "time_to_first_click_ms":
                             case "idle_time_total_ms":
+                            case "total_session_time_ms":
+                            case "active_time_ms":
                             case "dom_ready_ms":
                                 out.addProperty(key, (long) clamp(dv, 0, MAX_DOM_READY_MS));
                                 break;
