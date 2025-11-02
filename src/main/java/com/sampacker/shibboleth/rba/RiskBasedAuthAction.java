@@ -70,10 +70,11 @@ public class RiskBasedAuthAction extends AbstractProfileAction {
         m.put("pointer_event_count", FieldType.NUMBER);
         m.put("scroll_distance_px", FieldType.NUMBER);
         m.put("scroll_event_count", FieldType.NUMBER);
-        m.put("dom_ready_ms", FieldType.NUMBER);
         m.put("time_to_first_key_ms", FieldType.NUMBER);
         m.put("time_to_first_click_ms", FieldType.NUMBER);
         m.put("idle_time_total_ms", FieldType.NUMBER);
+        m.put("total_session_time_ms", FieldType.NUMBER);
+        m.put("active_time_ms", FieldType.NUMBER);
         m.put("input_focus_count", FieldType.NUMBER);
         m.put("paste_events", FieldType.NUMBER);
         m.put("resize_events", FieldType.NUMBER);
