@@ -525,3 +525,7 @@ This software is licensed under the **PolyForm Noncommercial License 1.0.0**. Yo
 software for **noncommercial purposes only**. See [LICENSE.md](LICENSE.md) for the full license text.
 
 Copyright © 2025 Sam Packer. Released under the PolyForm Noncommercial License 1.0.0.
+
+---
+
+![ShibBlue Logo](assets/shibboleth%20blue.png)
