@@ -1,0 +1,52 @@
+##
+## Velocity Template for RBA Access Denied view-state
+##
+<!DOCTYPE html>
+<html>
+<head>
+    <title>#springMessageText("idp.title", "Web Login Service") - Access Denied</title>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0">
+    <link rel="stylesheet" type="text/css" href="/idp#springMessageText("idp.css", "/css/placeholder.css")">
+</head>
+<body>
+<main class="main">
+    <header>
+        <img class="main-logo" src="/idp#springMessageText("idp.logo", "/images/placeholder-logo.png")" alt="#springMessageText("idp.logo.alt-text", "logo")" />
+        <h1>Access Denied</h1>
+    </header>
+    <section>
+        <p class="output-message output--error">
+            Your login attempt was denied by the risk-based authentication system.
+        </p>
+        #if ($threatScore)
+            <p><strong>Risk Score:</strong> ${threatScore}</p>
+        #end
+        <p>
+            This can happen if the system detected unusual login behavior or a high risk score.
+        </p>
+        <p>
+            If you believe this is in error, please contact your IT support team.
+            <br />
+            <a href="#springMessageText("idp.url.helpdesk", "https://helpdesk.example.org")">#springMessageText("idp.login.needHelp", "Need Help?")</a>
+        </p>
+        <form action="$flowExecutionUrl" method="POST">
+            #parse("csrf/csrf.vm")
+            <div class="grid">
+                <div class="grid-item">
+                    <button type="submit" class="button" name="_eventId_proceed">
+                        Continue
+                    </button>
+                </div>
+            </div>
+        </form>
+    </section>
+</main>
+<footer class="footer">
+    <div class="cc">
+        <p>#springMessageText("idp.footer", "Insert your footer text here.")</p>
+    </div>
+</footer>
+</body>
+</html>
