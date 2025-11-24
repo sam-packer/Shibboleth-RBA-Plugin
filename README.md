@@ -6,67 +6,62 @@ the response and either allow / deny the login.
 
 This plugin was tested on Shibboleth IdP 5.1.6.
 
+## Table of Contents
+
+- [Requirements](#requirements)
+- [Building](#building)
+- [Installation](#installation)
+    - [1. Deploy the JAR](#1-deploy-the-jar)
+    - [2. Configure Relying Party](#2-configure-relying-party)
+    - [3. Register the Intercept Flow](#3-register-the-intercept-flow)
+    - [4. Configure Intercept Events](#4-configure-intercept-events)
+    - [5. Add Flow Files](#5-add-flow-files)
+    - [6. Add View Templates](#6-add-view-templates)
+    - [7. Add JavaScript Data Collection](#7-add-javascript-data-collection)
+- [Verification](#verification)
+- [Troubleshooting](#troubleshooting)
+- [License](#license)
+
 ## Requirements
 
 - Java 17
 - Shibboleth IdP
 - Maven
 
-## To compile
+## Building
 
-```
+```bash
 mvn clean package
 ```
 
-## Setting up in Shibboleth
+## Installation
 
 This assumes your Shibboleth IdP directory is in: `/opt/shibboleth-idp`. This is also assuming a base Shibboleth
 instance with no customizations. You'll likely have to adapt this in some capacity to fit your Shibboleth environment.
 
-### Building the plugin
+### 1. Deploy the JAR
 
-After compiling the plugin, you'll want to copy the compiled JAR to `/opt/shibboleth-idp/edit-webapp/WEB-INF/lib`. If
-the directory doesn't exist, create it.
+After compiling the plugin, copy the compiled JAR to `/opt/shibboleth-idp/edit-webapp/WEB-INF/lib`. If the directory
+doesn't exist, create it.
 
-Then, rebuild Shibboleth: `/opt/shibboleth-idp/bin/build.sh`. You can then copy the `idp.war` file to your servlet
-container of choice (Jetty, Tomcat, etc.)
+Then, rebuild Shibboleth:
 
-If all goes well, you should see something similar:
-
-```
-INFO [net.shibboleth.idp.admin.impl.LogImplementationDetails:57] - Shibboleth IdP Version 5.1.6
-INFO [net.shibboleth.idp.admin.impl.LogImplementationDetails:58] - Java version='17.0.16' vendor='Debian'
-INFO [net.shibboleth.idp.admin.impl.LogImplementationDetails:73] - Plugins:
-INFO [net.shibboleth.idp.admin.impl.LogImplementationDetails:75] -                 com.sampacker.shibboleth.rba : v1.0.0
-INFO [net.shibboleth.idp.admin.impl.LogImplementationDetails:93] - Enabled Modules:
-INFO [net.shibboleth.idp.admin.impl.LogImplementationDetails:95] -                 Core IdP Functions (Required)
-INFO [net.shibboleth.idp.admin.impl.LogImplementationDetails:95] -                 Command Line Scripts
-INFO [net.shibboleth.idp.admin.impl.LogImplementationDetails:95] -                 Overlay Tree for WAR Build
-INFO [net.shibboleth.idp.admin.impl.LogImplementationDetails:95] -                 Password Authentication
-INFO [net.shibboleth.idp.admin.impl.LogImplementationDetails:95] -                 Hello World
-INFO [net.shibboleth.idp.admin.impl.ReportUpdateStatus:136] - No upgrade available from 5.1.6
-INFO [net.shibboleth.idp.admin.impl.ReportUpdateStatus:147] - Version 5.1.6 is current
+```bash
+/opt/shibboleth-idp/bin/build.sh
 ```
 
----
+You can then copy the `idp.war` file to your servlet container of choice (Jetty, Tomcat, etc.)
 
-Next, you'll need to modify the `/opt/shibboleth-idp/conf/relying-party.xml` file. Where you see this section:
+### 2. Configure Relying Party
 
-```xml
-
-<bean id="shibboleth.DefaultRelyingParty" parent="RelyingParty">
-    ...
-</bean>
-```
-
-By default, you will have this line:
+Modify `/opt/shibboleth-idp/conf/relying-party.xml`. In the `shibboleth.DefaultRelyingParty` bean, change:
 
 ```xml
 
 <ref bean="SAML2.SSO"/>
 ```
 
-You'll want to change it to this:
+To:
 
 ```xml
 
@@ -75,420 +70,95 @@ You'll want to change it to this:
 
 If you already have existing flows, you can simply add rba as another entry in your list.
 
----
+### 3. Register the Intercept Flow
 
-Next, you'll want to modify your `/opt/shibboleth-idp/conf/interceptors/profile-intercept.xml` file to add this:
+Modify `/opt/shibboleth-idp/conf/interceptors/profile-intercept.xml` to register the RBA intercept flow.
+
+See: [`examples/config/profile-intercept.xml`](examples/config/profile-intercept.xml)
+
+The important line to add is:
 
 ```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<beans xmlns="http://www.springframework.org/schema/beans"
-       xmlns:util="http://www.springframework.org/schema/util"
-       xmlns:p="http://www.springframework.org/schema/p"
-       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-       xsi:schemaLocation="
-         http://www.springframework.org/schema/beans http://www.springframework.org/schema/beans/spring-beans.xsd
-         http://www.springframework.org/schema/util  http://www.springframework.org/schema/util/spring-util.xsd">
 
-    <bean id="shibboleth.AvailableInterceptFlows" parent="shibboleth.DefaultInterceptFlows" lazy-init="true">
-        <property name="sourceList">
-            <list merge="true">
-                <bean id="intercept/rba" parent="shibboleth.InterceptFlow"/>
-            </list>
-        </property>
-    </bean>
-
-</beans>
-```
-
-You may have other entries in your file, which is okay. The important line to add is:
-
-```
 <bean id="intercept/rba" parent="shibboleth.InterceptFlow"/>
 ```
 
----
+### 4. Configure Intercept Events
 
-Next, modify your `/opt/shibboleth-idp/conf/interceptors/intercept-events-flow.xml` as follows:
+Modify `/opt/shibboleth-idp/conf/interceptors/intercept-events-flow.xml` to tell Shibboleth about the AccessDenied and
+RuntimeException events. Otherwise, if someone is denied access, it will always be treated as an `InvalidEvent`.
 
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<flow xmlns="http://www.springframework.org/schema/webflow"
-      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-      xsi:schemaLocation="http://www.springframework.org/schema/webflow http://www.springframework.org/schema/webflow/spring-webflow.xsd"
-      abstract="true">
+See: [`examples/config/intercept-events-flow.xml`](examples/config/intercept-events-flow.xml)
 
-    <end-state id="AccessDenied"/>
-    <end-state id="RuntimeException"/>
+### 5. Add Flow Files
 
-    <global-transitions>
-        <transition on="AccessDenied" to="AccessDenied"/>
-        <transition on="RuntimeException" to="RuntimeException"/>
+Create the flow directory and add the flow configuration files:
 
-        <transition on="#{!'proceed'.equals(currentEvent.id)}" to="InvalidEvent"/>
-    </global-transitions>
-</flow>
-```
-
-The key change here is to tell Shibboleth about the AccessDenied and RuntimeException events. Otherwise, if someone is
-denied access, it will always be treated as an `InvalidEvent`.
-
----
-
-Now, you'll want to add the XML files for the flow at `/opt/shibboleth-idp/flows/intercept/rba`.
-
-Create the directory:
-
-```
+```bash
 mkdir -p /opt/shibboleth-idp/flows/intercept/rba
 ```
 
-Add this to `/opt/shibboleth-idp/flows/intercept/rba/rba-flow.xml`:
+Copy the following files to `/opt/shibboleth-idp/flows/intercept/rba/`:
 
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<flow xmlns="http://www.springframework.org/schema/webflow"
-      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-      xsi:schemaLocation="http://www.springframework.org/schema/webflow http://www.springframework.org/schema/webflow/spring-webflow.xsd"
-      parent="intercept.abstract">
+- [`rba-flow.xml`](examples/flows/intercept/rba/rba-flow.xml) - Defines the webflow states and transitions
+- [`rba-beans.xml`](examples/flows/intercept/rba/rba-beans.xml) - Configures the RBA action bean
 
-    <action-state id="CallRBA">
-        <evaluate expression="rbaWebflowAction"/>
-        <transition on="proceed" to="proceed"/>
-        <transition on="AccessDenied" to="ShowDenialPage"/>
-        <transition on="RuntimeException" to="RuntimeException"/>
-    </action-state>
+The example flow provided does the following:
 
-    <view-state id="ShowDenialPage" view="access-denied">
-        <transition on="proceed" to="AccessDenied"/>
-    </view-state>
+- If the threat score is below the threshold, proceed to the next event
+- If the threat score is above the threshold, transition to the access denied page
 
-    <end-state id="AccessDenied"/>
+The threat score from the API is exposed to the profile request context. You can optionally render it if you desire. You
+are able to customize the flow however you desire.
 
-    <bean-import resource="rba-beans.xml"/>
-</flow>
+**Bean Configuration Options:**
+
+The `rba-beans.xml` file supports two configuration modes:
+
+1. **MLFlow mode (recommended):** Uses dynamic threshold from your MLFlow server
+2. **Manual threshold mode:** Hardcoded threshold value (not recommended for production)
+
+See the example file for both configurations.
+
+### 6. Add View Templates
+
+Create the views directory and add the access denied template:
+
+```bash
+mkdir -p /opt/shibboleth-idp/views/intercept
 ```
 
-Add this to `/opt/shibboleth-idp/flows/intercept/rba/rba-beans.xml`:
+Copy [`rba-access-denied.vm`](examples/views/intercept/rba-access-denied.vm) to `/opt/shibboleth-idp/views/intercept/`.
 
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<beans xmlns="http://www.springframework.org/schema/beans"
-       xmlns:p="http://www.springframework.org/schema/p"
-       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-       xsi:schemaLocation="
-         http://www.springframework.org/schema/beans https://www.springframework.org/schema/beans/spring-beans.xsd">
+This will give a nice page to the user before sending them to the page that shows the SP denied them.
 
-    <bean id="rbaAction"
-          class="com.sampacker.shibboleth.rba.RiskBasedAuthAction"
-          init-method="initialize"
-          destroy-method="destroy"
-          p:rbaEndpoint="https://shib-predict.sampacker.local/score"
-          p:failureThreshold="0.60"/>
+### 7. Add JavaScript Data Collection
 
-    <bean id="rbaWebflowAction"
-          class="net.shibboleth.idp.profile.impl.WebFlowProfileActionAdaptor"
-          init-method="initialize"
-          destroy-method="destroy">
-        <constructor-arg ref="rbaAction"/>
-    </bean>
-</beans>
+Create the JS directory in edit-webapp:
+
+```bash
+mkdir -p /opt/shibboleth-idp/edit-webapp/js
 ```
 
-This file is important as this is where you'll want to set the RBA endpoint and failure threshold.
+Copy [`rba-metrics.js`](examples/js/rba-metrics.js) to `/opt/shibboleth-idp/edit-webapp/js/`.
 
----
-
-Next, add the JavaScript collection. In `/opt/shibboleth-idp/edit-webapp`, create a new `js` folder and put the file `rba-metrics.js` inside:
-```javascript
-
-(() => {
-  const start = performance.now();
-
-  // ---- Counters ----
-  let focusChanges = 0,
-    blurEvents = 0;
-  let clickCount = 0,
-    keyCount = 0;
-  let totalKeyDelay = 0,
-    lastKeyTime = null;
-  let pointerDistance = 0,
-    pointerEventCount = 0;
-  let scrollDistance = 0,
-    scrollEventCount = 0;
-  let lastScroll = window.scrollY || document.documentElement.scrollTop;
-  let lastMoveTime = 0,
-    lastX = null,
-    lastY = null;
-  let firstKeyTime = null,
-    firstClickTime = null;
-  let pasteCount = 0,
-    inputFocusCount = 0,
-    resizeCount = 0;
-
-  // ---- Idle tracking ----
-  let lastActivity = performance.now();
-  let idleTimeTotal = 0;
-  let wasIdle = false;
-  let idleStartTime = null;
-
-  function recordActivity() {
-    const now = performance.now();
-    if (wasIdle && idleStartTime !== null) {
-      // We were idle, now we're active - add the idle period
-      idleTimeTotal += now - idleStartTime;
-      wasIdle = false;
-      idleStartTime = null;
-    }
-    lastActivity = now;
-  }
-
-  // Check for idle periods periodically
-  setInterval(() => {
-    const now = performance.now();
-    const timeSinceActivity = now - lastActivity;
-
-    // If it's been more than 100ms since last activity, consider it idle
-    if (timeSinceActivity > 100 && !wasIdle) {
-      wasIdle = true;
-      idleStartTime = lastActivity;
-    }
-  }, 50);
-
-  [
-    "mousemove",
-    "pointermove",
-    "touchmove",
-    "keydown",
-    "click",
-    "scroll",
-    "focus",
-  ].forEach((ev) =>
-    document.addEventListener(ev, recordActivity, { passive: true }),
-  );
-
-  // ---- Event listeners ----
-  document.addEventListener("visibilitychange", () => focusChanges++);
-  window.addEventListener("focus", () => focusChanges++);
-  window.addEventListener("blur", () => blurEvents++);
-  document.addEventListener("click", () => {
-    clickCount++;
-    if (!firstClickTime) firstClickTime = performance.now();
-  });
-
-  document.addEventListener("keydown", () => {
-    const now = performance.now();
-    if (!firstKeyTime) firstKeyTime = now;
-    if (lastKeyTime) totalKeyDelay += now - lastKeyTime;
-    lastKeyTime = now;
-    keyCount++;
-  });
-
-  document.addEventListener("paste", () => pasteCount++);
-  document.addEventListener("focusin", (e) => {
-    if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA")
-      inputFocusCount++;
-  });
-
-  const trackPointer = (e) => {
-    const now = performance.now();
-    if (now - lastMoveTime < 50) return; // throttle ~20 Hz
-    pointerEventCount++;
-    if (lastX !== null && lastY !== null) {
-      pointerDistance += Math.hypot(e.pageX - lastX, e.pageY - lastY);
-    }
-    lastX = e.pageX;
-    lastY = e.pageY;
-    lastMoveTime = now;
-  };
-  document.addEventListener("mousemove", trackPointer, { passive: true });
-  document.addEventListener("pointermove", trackPointer, { passive: true });
-  document.addEventListener(
-    "touchmove",
-    (e) => {
-      pointerEventCount++;
-      const touch = e.touches && e.touches[0];
-      if (!touch) return;
-      const { pageX, pageY } = touch;
-      if (lastX !== null && lastY !== null) {
-        pointerDistance += Math.hypot(pageX - lastX, pageY - lastY);
-      }
-      lastX = pageX;
-      lastY = pageY;
-    },
-    { passive: true },
-  );
-
-  window.addEventListener(
-    "scroll",
-    () => {
-      const currentScroll =
-        window.scrollY || document.documentElement.scrollTop;
-      scrollDistance += Math.abs(currentScroll - lastScroll);
-      lastScroll = currentScroll;
-      scrollEventCount++;
-    },
-    { passive: true },
-  );
-
-  window.addEventListener("resize", () => resizeCount++);
-
-  // ---- Device UUID management ----
-  function generateUUIDv4() {
-    return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
-      const r = crypto.getRandomValues(new Uint8Array(1))[0] & 15;
-      const v = c === "x" ? r : (r & 0x3) | 0x8;
-      return v.toString(16);
-    });
-  }
-
-  let deviceUUID = localStorage.getItem("rbaDeviceUUID");
-  if (!deviceUUID) {
-    deviceUUID = generateUUIDv4();
-    localStorage.setItem("rbaDeviceUUID", deviceUUID);
-  }
-
-  // ---- On form submit, attach metrics ----
-  const form = document.querySelector("form");
-  const metricsField = document.getElementById("rbaMetricsField");
-
-  if (form && metricsField) {
-    form.addEventListener("submit", () => {
-      const now = performance.now();
-      const elapsed = Math.max(0, now - start);
-      const avgKeyDelay = keyCount ? totalKeyDelay / keyCount : 0;
-
-      // Account for final idle period if currently idle
-      if (wasIdle && idleStartTime !== null) {
-        idleTimeTotal += now - idleStartTime;
-      }
-
-      // --- Environment snapshot ---
-      const env = {
-        tz_offset_min: new Date().getTimezoneOffset(),
-        language: navigator.language || "unknown",
-        platform:
-          navigator.userAgentData?.platform || navigator.platform || "unknown",
-        device_memory_gb: navigator.deviceMemory || null,
-        hardware_concurrency: navigator.hardwareConcurrency || null,
-        screen_width_px: screen.width,
-        screen_height_px: screen.height,
-        pixel_ratio: window.devicePixelRatio || 1,
-        color_depth: screen.colorDepth || null,
-        touch_support: "ontouchstart" in window,
-        webauthn_supported: !!window.PublicKeyCredential,
-      };
-
-      // --- Metrics ---
-      const metrics = {
-        device_uuid: deviceUUID,
-        focus_changes: focusChanges,
-        blur_events: blurEvents,
-        click_count: clickCount,
-        key_count: keyCount,
-        avg_key_delay_ms: Math.round(avgKeyDelay),
-        pointer_distance_px: Math.round(pointerDistance),
-        pointer_event_count: pointerEventCount,
-        scroll_distance_px: Math.round(scrollDistance),
-        scroll_event_count: scrollEventCount,
-        time_to_first_key_ms: firstKeyTime
-          ? Math.round(firstKeyTime - start)
-          : null,
-        time_to_first_click_ms: firstClickTime
-          ? Math.round(firstClickTime - start)
-          : null,
-        total_session_time_ms: Math.round(elapsed),
-        idle_time_total_ms: Math.round(idleTimeTotal),
-        active_time_ms: Math.round(elapsed - idleTimeTotal),
-        input_focus_count: inputFocusCount,
-        paste_events: pasteCount,
-        resize_events: resizeCount,
-        metrics_version: 4,
-        collection_timestamp: new Date().toISOString(),
-        ...env,
-      };
-
-      try {
-        metricsField.value = JSON.stringify(metrics);
-      } catch (err) {
-        console.error("RBA metrics serialization failed", err);
-      }
-    });
-  } else {
-    console.warn("RBA metrics script: form or #rbaMetricsField not found");
-  }
-})();
-```
-
-On your login form, you MUST include an invisible field for the metrics. At `/opt/shibboleth-idp/views/login.vm`, add
-this right before the end of the closing `<form>` tag.
+On your login form, you **must** include an invisible field for the metrics. In your login template (most likely at
+`/opt/shibboleth-idp/views/login.vm`), add this right before the closing `</form>` tag:
 
 ```html
-<input type="hidden" id="rbaMetricsField" name="rbaMetricsField" value="" />
+<input type="hidden" id="rbaMetricsField" name="rbaMetricsField" value=""/>
 ```
 
----
+## Verification
 
-Finally, create an Access Denied view. You must name it `/opt/shibboleth-idp/views/access-denied.vm`. This is where you
-get to style it however, you want, but here's an example one:
-```html
-<!DOCTYPE html>
-<html>
-  <head>
-    <title>Access Denied</title>
-    <meta charset="UTF-8" />
-    <meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0">
-    <link rel="stylesheet" type="text/css" href="/idp/css/placeholder.css">
-  </head>
+If all goes well, you should see something similar in your logs:
 
-  <body>
-    <main class="main">
-      <header>
-        <img class="main-logo" src="/idp/images/shibboleth blue.png" alt="ShibBlue" />
-        <h1>Access Denied</h1>
-      </header>
-
-      <section>
-        <p class="output-message output--error">
-          Your login attempt was denied by the risk-based authentication system.
-        </p>
-
-        <p>
-          This can happen if the system detected unusual login behavior or a high risk score.
-        </p>
-
-        <p>
-          If you believe this is in error, please contact your IT support team.
-          <br />
-          <a href="https://helpdesk.example.org">Need Help?</a>
-        </p>
-
-        <form action="$flowExecutionUrl" method="POST">
-
-          #parse("csrf/csrf.vm")
-
-          <div class="grid">
-            <div class="grid-item">
-              <button type="submit" class="button" name="_eventId_proceed">
-                Continue
-              </button>
-            </div>
-          </div>
-        </form>
-      </section>
-    </main>
-
-    <footer class="footer">
-      <div class="cc">
-        <p>Your IdP footer text here.</p>
-      </div>
-    </footer>
-  </body>
-</html>
 ```
-
-Your environment may require different or additional configuration. However, this is what's required to get it working
-with a stock Shibboleth IdP instance.
+INFO [net.shibboleth.idp.admin.impl.LogImplementationDetails:57] - Shibboleth IdP Version 5.1.6
+INFO [net.shibboleth.idp.admin.impl.LogImplementationDetails:58] - Java version='17.0.16' vendor='Debian'
+INFO [net.shibboleth.idp.admin.impl.LogImplementationDetails:73] - Plugins:
+INFO [net.shibboleth.idp.admin.impl.LogImplementationDetails:75] -                 com.sampacker.shibboleth.rba : v2.1.0
+```
 
 A successful authentication should look like this (or similar, depending on your flow):
 

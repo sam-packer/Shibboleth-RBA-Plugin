@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<beans xmlns="http://www.springframework.org/schema/beans"
+       xmlns:p="http://www.springframework.org/schema/p"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="
+         http://www.springframework.org/schema/beans https://www.springframework.org/schema/beans/spring-beans.xsd">
+
+    <!-- Use this setup if you are using MLFlow (highly recommended).
+     The threshold is automatically updated and ensures fair scoring regardless of model version. -->
+    <bean id="rbaAction"
+          class="com.sampacker.shibboleth.rba.RiskBasedAuthAction"
+          init-method="initialize"
+          destroy-method="destroy"
+          p:rbaEndpoint="https://shib-predict.sampacker.local/score"
+          p:modelsEndpoint="https://shib-predict.sampacker.local/models"/>
+
+    <!-- Use this setup if you are not using MLFlow.
+    You will be responsible for updating the threshold each time after training. -->
+    <!-- <bean id="rbaAction"
+          class="com.sampacker.shibboleth.rba.RiskBasedAuthAction"
+          init-method="initialize"
+          destroy-method="destroy"
+          p:rbaEndpoint="https://shib-predict.sampacker.local/score"
+          p:failureThreshold="0.50"/> -->
+
+    <bean id="rbaWebflowAction"
+          class="net.shibboleth.idp.profile.impl.WebFlowProfileActionAdaptor"
+          init-method="initialize"
+          destroy-method="destroy">
+        <constructor-arg ref="rbaAction"/>
+    </bean>
+</beans>

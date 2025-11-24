@@ -1,0 +1,26 @@
+
+<?xml version="1.0" encoding="UTF-8"?>
+<flow xmlns="http://www.springframework.org/schema/webflow"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="http://www.springframework.org/schema/webflow http://www.springframework.org/schema/webflow/spring-webflow.xsd"
+      parent="intercept.abstract">
+
+    <action-state id="CallRBA">
+        <evaluate expression="rbaWebflowAction"/>
+        <transition on="proceed" to="proceed"/>
+        <transition on="AccessDenied" to="ShowDenialPage"/>
+        <transition on="RuntimeException" to="RuntimeException"/>
+    </action-state>
+
+    <view-state id="ShowDenialPage" view="intercept/rba-access-denied">
+        <on-render>
+            <evaluate expression="opensamlProfileRequestContext.getSubcontext(T(net.shibboleth.idp.authn.context.AuthenticationContext)).getSubcontext(T(com.sampacker.shibboleth.rba.context.RBAContext)).getThreatScore()"
+                      result="viewScope.threatScore"/>
+        </on-render>
+        <transition on="proceed" to="AccessDenied"/>
+    </view-state>
+
+    <end-state id="AccessDenied"/>
+
+    <bean-import resource="rba-beans.xml"/>
+</flow>

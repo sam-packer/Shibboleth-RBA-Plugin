@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<flow xmlns="http://www.springframework.org/schema/webflow"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="http://www.springframework.org/schema/webflow http://www.springframework.org/schema/webflow/spring-webflow.xsd"
+      abstract="true">
+
+    <end-state id="AccessDenied"/>
+    <end-state id="RuntimeException"/>
+    <end-state id="HandleError"/>
+
+    <global-transitions>
+        <transition on="AccessDenied" to="AccessDenied"/>
+        <transition on="RuntimeException" to="RuntimeException"/>
+        <transition on="HandleError" to="HandleError"/>
+
+        <transition on="#{!'proceed'.equals(currentEvent.id)}" to="InvalidEvent"/>
+    </global-transitions>
+</flow>

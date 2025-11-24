@@ -14,6 +14,7 @@
 package com.sampacker.shibboleth.rba;
 
 import com.google.gson.*;
+import com.sampacker.shibboleth.rba.context.RBAContext;
 import jakarta.servlet.http.HttpServletRequest;
 import net.shibboleth.idp.authn.AuthenticationResult;
 import net.shibboleth.idp.authn.context.AuthenticationContext;
@@ -41,7 +42,8 @@ import static com.sampacker.shibboleth.rba.utils.StringHelper.*;
 /**
  * Calls an external RBA service with behavioral metrics and enforces access based on threatScore.
  */
-public class RiskBasedAuthAction extends AbstractProfileAction {
+public class RiskBasedAuthAction extends AbstractProfileAction
+{
 
     private static final Gson GSON = new GsonBuilder().serializeNulls().create();
     private static final int CONNECT_TIMEOUT_MS = 5000;
@@ -55,11 +57,13 @@ public class RiskBasedAuthAction extends AbstractProfileAction {
     private String rbaEndpoint;
     private double failureThreshold;
 
-    public enum FieldType {NUMBER, BOOLEAN, STRING}
+    public enum FieldType
+    {NUMBER, BOOLEAN, STRING}
 
     public static final Map<String, FieldType> ALLOWED_FIELDS;
 
-    static {
+    static
+    {
         Map<String, FieldType> m = new LinkedHashMap<>();
         m.put("focus_changes", FieldType.NUMBER);
         m.put("blur_events", FieldType.NUMBER);
@@ -95,39 +99,47 @@ public class RiskBasedAuthAction extends AbstractProfileAction {
         ALLOWED_FIELDS = Collections.unmodifiableMap(m);
     }
 
-    public String getRbaEndpoint() {
+    public String getRbaEndpoint()
+    {
         return rbaEndpoint;
     }
 
-    public void setRbaEndpoint(String rbaEndpoint) {
+    public void setRbaEndpoint(String rbaEndpoint)
+    {
         this.rbaEndpoint = rbaEndpoint;
     }
 
-    public double getFailureThreshold() {
+    public double getFailureThreshold()
+    {
         return failureThreshold;
     }
 
-    public void setFailureThreshold(double failureThreshold) {
+    public void setFailureThreshold(double failureThreshold)
+    {
         this.failureThreshold = failureThreshold;
     }
 
     @Override
-    protected void doExecute(@Nonnull final ProfileRequestContext prc) {
+    protected void doExecute(@Nonnull final ProfileRequestContext prc)
+    {
         final AuthenticationContext authnCtx = prc.getSubcontext(AuthenticationContext.class);
-        if (authnCtx == null || authnCtx.getAuthenticationResult() == null) {
+        if (authnCtx == null || authnCtx.getAuthenticationResult() == null)
+        {
             log.error("AuthenticationContext or AuthenticationResult is not available.");
             emit(prc, EventIds.RUNTIME_EXCEPTION);
             return;
         }
 
-        if (rbaEndpoint == null || rbaEndpoint.isBlank()) {
+        if (rbaEndpoint == null || rbaEndpoint.isBlank())
+        {
             log.error("rbaEndpoint is not configured.");
             emit(prc, EventIds.RUNTIME_EXCEPTION);
             return;
         }
 
         final HttpServletRequest servletRequest = HttpServletRequestResponseContext.getRequest();
-        if (servletRequest == null) {
+        if (servletRequest == null)
+        {
             log.error("HttpServletRequest is not available.");
             emit(prc, EventIds.RUNTIME_EXCEPTION);
             return;
@@ -147,17 +159,22 @@ public class RiskBasedAuthAction extends AbstractProfileAction {
         log.debug("rbaMetricsField raw={}", metricsRaw);
 
         // Check if metrics are null (SSO attempt)
-        if (metricsRaw == null || metricsRaw.isBlank()) {
+        if (metricsRaw == null || metricsRaw.isBlank())
+        {
             // Check if this user was previously denied
             Long denialTime = DENIED_USERS.get(username);
-            if (denialTime != null) {
+            if (denialTime != null)
+            {
                 long timeSinceDenial = System.currentTimeMillis() - denialTime;
-                if (timeSinceDenial < DENIAL_TIMEOUT_MS) {
+                if (timeSinceDenial < DENIAL_TIMEOUT_MS)
+                {
                     log.warn("RBA: SSO attempt by previously denied user '{}' (denied {}ms ago) - BLOCKING",
                             username, timeSinceDenial);
                     emit(prc, EventIds.ACCESS_DENIED);
                     return;
-                } else {
+                }
+                else
+                {
                     // Timeout expired, remove from denied list
                     DENIED_USERS.remove(username);
                     log.info("RBA: Denial timeout expired for user '{}', allowing SSO", username);
@@ -172,7 +189,8 @@ public class RiskBasedAuthAction extends AbstractProfileAction {
 
         // Metrics present - this is a fresh login, perform full RBA check
         JsonObject sanitizedMetrics = sanitizeAndValidateMetrics(metricsRaw);
-        if (sanitizedMetrics == null) {
+        if (sanitizedMetrics == null)
+        {
             log.warn("Metrics were rejected or invalid; denying access for user='{}'", username);
             DENIED_USERS.put(username, System.currentTimeMillis());
             emit(prc, EventIds.ACCESS_DENIED);
@@ -188,7 +206,8 @@ public class RiskBasedAuthAction extends AbstractProfileAction {
 
         // Send to RBA endpoint
         HttpURLConnection conn = null;
-        try {
+        try
+        {
             final URL url = new URL(rbaEndpoint);
             conn = (HttpURLConnection) url.openConnection();
             conn.setRequestMethod("POST");
@@ -200,9 +219,11 @@ public class RiskBasedAuthAction extends AbstractProfileAction {
 
             final String jsonPayload = GSON.toJson(payload);
             log.debug("Sending payload to RBA service: {}", maskPayloadForLogs(jsonPayload));
-            try (OutputStream os = conn.getOutputStream()) {
+            try (OutputStream os = conn.getOutputStream())
+            {
                 byte[] bytes = jsonPayload.getBytes(StandardCharsets.UTF_8);
-                if (bytes.length > (64 * 1024)) {
+                if (bytes.length > (64 * 1024))
+                {
                     log.warn("Prepared RBA payload too large ({} bytes); aborting call.", bytes.length);
                     emit(prc, EventIds.RUNTIME_EXCEPTION);
                     return;
@@ -215,34 +236,45 @@ public class RiskBasedAuthAction extends AbstractProfileAction {
             final String body = readAll(ok ? conn.getInputStream() : conn.getErrorStream());
             log.debug("RBA service HTTP {} body: {}", status, body);
 
-            if (!ok) {
+            if (!ok)
+            {
                 log.error("RBA service returned non-2xx status: {}", status);
                 emit(prc, EventIds.RUNTIME_EXCEPTION);
                 return;
             }
 
             final JsonObject json = GSON.fromJson(body, JsonObject.class);
-            if (json == null || !json.has("threatScore")) {
+
+
+            if (json == null || !json.has("threatScore"))
+            {
                 log.error("RBA response missing required 'threatScore'.");
                 emit(prc, EventIds.RUNTIME_EXCEPTION);
                 return;
             }
 
             final double threatScore = json.get("threatScore").getAsDouble();
-            if (!Double.isFinite(threatScore)) {
+            if (!Double.isFinite(threatScore))
+            {
                 log.error("RBA 'threatScore' is not a finite number: {}", threatScore);
                 emit(prc, EventIds.RUNTIME_EXCEPTION);
                 return;
             }
 
+            RBAContext rbaCtx = authnCtx.ensureSubcontext(RBAContext.class);
+            rbaCtx.setThreatScore(threatScore);
+
             log.info("RBA score={}, idpThreshold={}", threatScore, failureThreshold);
 
-            if (threatScore < failureThreshold) {
+            if (threatScore < failureThreshold)
+            {
                 // User passed RBA - remove from denied list if present
                 DENIED_USERS.remove(username);
                 log.info("RBA: User '{}' passed RBA check - ALLOWING", username);
                 emit(prc, EventIds.PROCEED_EVENT_ID);
-            } else {
+            }
+            else
+            {
                 // User failed RBA - add to denied list
                 DENIED_USERS.put(username, System.currentTimeMillis());
                 log.warn("Login denied by RBA: threatScore {} >= threshold {}. User '{}' blocked for {}ms",
@@ -250,20 +282,28 @@ public class RiskBasedAuthAction extends AbstractProfileAction {
                 emit(prc, EventIds.ACCESS_DENIED);
             }
 
-        } catch (JsonSyntaxException jse) {
+        }
+        catch (JsonSyntaxException jse)
+        {
             log.error("Invalid JSON from RBA service.", jse);
             emit(prc, EventIds.RUNTIME_EXCEPTION);
-        } catch (Exception e) {
+        }
+        catch (Exception e)
+        {
             log.error("Error calling RBA service at {}", rbaEndpoint, e);
             emit(prc, EventIds.RUNTIME_EXCEPTION);
-        } finally {
-            if (conn != null) {
+        }
+        finally
+        {
+            if (conn != null)
+            {
                 conn.disconnect();
             }
         }
     }
 
-    public void emit(ProfileRequestContext prc, String eventId) {
+    public void emit(ProfileRequestContext prc, String eventId)
+    {
         final EventContext ec = prc.ensureSubcontext(EventContext.class);
         ec.setEvent(eventId);
         final EventContext readback = prc.getSubcontext(EventContext.class);
