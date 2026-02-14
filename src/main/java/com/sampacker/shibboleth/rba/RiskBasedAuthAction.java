@@ -27,6 +27,8 @@ import org.opensaml.profile.context.ProfileRequestContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import net.shibboleth.shared.component.ComponentInitializationException;
+
 import javax.annotation.Nonnull;
 import java.io.*;
 import java.net.HttpURLConnection;
@@ -56,6 +58,9 @@ public class RiskBasedAuthAction extends AbstractProfileAction
 
     private String rbaEndpoint;
     private double failureThreshold;
+    private String modelsEndpoint;
+    private int modelRefreshIntervalSeconds = 60;
+    private ModelRegistryCache modelCache;
 
     public enum FieldType
     {NUMBER, BOOLEAN, STRING}
@@ -117,6 +122,52 @@ public class RiskBasedAuthAction extends AbstractProfileAction
     public void setFailureThreshold(double failureThreshold)
     {
         this.failureThreshold = failureThreshold;
+    }
+
+    public String getModelsEndpoint()
+    {
+        return modelsEndpoint;
+    }
+
+    public void setModelsEndpoint(String modelsEndpoint)
+    {
+        this.modelsEndpoint = modelsEndpoint;
+    }
+
+    public int getModelRefreshIntervalSeconds()
+    {
+        return modelRefreshIntervalSeconds;
+    }
+
+    public void setModelRefreshIntervalSeconds(int modelRefreshIntervalSeconds)
+    {
+        this.modelRefreshIntervalSeconds = modelRefreshIntervalSeconds;
+    }
+
+    @Override
+    protected void doInitialize() throws ComponentInitializationException
+    {
+        super.doInitialize();
+        if (modelsEndpoint != null && !modelsEndpoint.isBlank())
+        {
+            log.info("Dynamic threshold mode enabled. Models endpoint: {}", modelsEndpoint);
+            modelCache = new ModelRegistryCache(modelsEndpoint, modelRefreshIntervalSeconds);
+            modelCache.start();
+        }
+        else
+        {
+            log.info("Static threshold mode enabled. Threshold: {}", failureThreshold);
+        }
+    }
+
+    @Override
+    protected void doDestroy()
+    {
+        if (modelCache != null)
+        {
+            modelCache.stop();
+        }
+        super.doDestroy();
     }
 
     @Override
@@ -238,13 +289,12 @@ public class RiskBasedAuthAction extends AbstractProfileAction
 
             if (!ok)
             {
-                log.error("RBA service returned non-2xx status: {}", status);
-                emit(prc, EventIds.RUNTIME_EXCEPTION);
+                log.error("RBA service returned non-2xx status: {}. Failing open.", status);
+                emit(prc, EventIds.PROCEED_EVENT_ID);
                 return;
             }
 
             final JsonObject json = GSON.fromJson(body, JsonObject.class);
-
 
             if (json == null || !json.has("threatScore"))
             {
@@ -261,12 +311,20 @@ public class RiskBasedAuthAction extends AbstractProfileAction
                 return;
             }
 
+            // Parse optional modelVersion from response
+            final Integer modelVersion = json.has("modelVersion") && !json.get("modelVersion").isJsonNull()
+                    ? json.get("modelVersion").getAsInt() : null;
+
             RBAContext rbaCtx = authnCtx.ensureSubcontext(RBAContext.class);
             rbaCtx.setThreatScore(threatScore);
+            rbaCtx.setModelVersion(modelVersion);
 
-            log.info("RBA score={}, idpThreshold={}", threatScore, failureThreshold);
+            // Resolve threshold
+            final double resolvedThreshold = resolveThreshold(modelVersion);
 
-            if (threatScore < failureThreshold)
+            log.info("RBA score={}, resolvedThreshold={}, modelVersion={}", threatScore, resolvedThreshold, modelVersion);
+
+            if (threatScore < resolvedThreshold)
             {
                 // User passed RBA - remove from denied list if present
                 DENIED_USERS.remove(username);
@@ -278,7 +336,7 @@ public class RiskBasedAuthAction extends AbstractProfileAction
                 // User failed RBA - add to denied list
                 DENIED_USERS.put(username, System.currentTimeMillis());
                 log.warn("Login denied by RBA: threatScore {} >= threshold {}. User '{}' blocked for {}ms",
-                        threatScore, failureThreshold, username, DENIAL_TIMEOUT_MS);
+                        threatScore, resolvedThreshold, username, DENIAL_TIMEOUT_MS);
                 emit(prc, EventIds.ACCESS_DENIED);
             }
 
@@ -290,8 +348,8 @@ public class RiskBasedAuthAction extends AbstractProfileAction
         }
         catch (Exception e)
         {
-            log.error("Error calling RBA service at {}", rbaEndpoint, e);
-            emit(prc, EventIds.RUNTIME_EXCEPTION);
+            log.error("Error calling RBA service at {}. Failing open.", rbaEndpoint, e);
+            emit(prc, EventIds.PROCEED_EVENT_ID);
         }
         finally
         {
@@ -300,6 +358,55 @@ public class RiskBasedAuthAction extends AbstractProfileAction
                 conn.disconnect();
             }
         }
+    }
+
+    /**
+     * Resolves the threshold to use for the current request.
+     * In dynamic mode (modelsEndpoint set), looks up the threshold from the model cache.
+     * Falls back to failureThreshold or fail-open (0.0) if no threshold is available.
+     */
+    private double resolveThreshold(Integer modelVersion)
+    {
+        // Static mode: no model cache configured
+        if (modelCache == null)
+        {
+            return failureThreshold;
+        }
+
+        // Dynamic mode: try to resolve from cache
+        Double threshold = null;
+
+        if (modelVersion != null)
+        {
+            threshold = modelCache.getThreshold(modelVersion);
+            if (threshold == null)
+            {
+                // Cache miss for this version - trigger async refresh and use latest
+                log.debug("No cached threshold for modelVersion={}. Triggering async refresh.", modelVersion);
+                modelCache.triggerAsyncRefresh();
+                threshold = modelCache.getLatestThreshold();
+            }
+        }
+        else
+        {
+            threshold = modelCache.getLatestThreshold();
+        }
+
+        if (threshold != null)
+        {
+            return threshold;
+        }
+
+        // Cache is empty - fall back to static threshold if configured
+        if (failureThreshold > 0)
+        {
+            log.warn("Model cache is empty. Falling back to static failureThreshold={}.", failureThreshold);
+            return failureThreshold;
+        }
+
+        // No threshold available at all - fail open
+        log.error("No threshold available from model cache or static config. Failing open.");
+        return Double.MAX_VALUE;
     }
 
     public void emit(ProfileRequestContext prc, String eventId)

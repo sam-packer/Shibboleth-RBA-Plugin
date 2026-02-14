@@ -194,7 +194,7 @@ the IDs are correct.
 This software is licensed under the **PolyForm Noncommercial License 1.0.0**. You may use, copy, and modify this
 software for **noncommercial purposes only**. See [LICENSE.md](LICENSE.md) for the full license text.
 
-Copyright © 2025 Sam Packer. Released under the PolyForm Noncommercial License 1.0.0.
+Copyright © 2025-2026 Sam Packer. Released under the PolyForm Noncommercial License 1.0.0.
 
 ---
 
