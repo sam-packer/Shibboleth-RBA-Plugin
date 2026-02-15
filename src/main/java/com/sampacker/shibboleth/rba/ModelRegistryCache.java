@@ -99,7 +99,16 @@ public class ModelRegistryCache
     }
 
     /**
-     * Fetches /models, parses the JSON array, and updates the cache.
+     * Performs a synchronous refresh of the cache.
+     * Used for cache-miss retry flow where the caller needs updated data immediately.
+     */
+    public void refreshNow()
+    {
+        refresh();
+    }
+
+    /**
+     * Fetches /models, parses the JSON response, and updates the cache.
      * On failure, logs a warning and retains previous cache (never clears on error).
      */
     void refresh()
@@ -124,10 +133,17 @@ public class ModelRegistryCache
                 return;
             }
 
-            final JsonArray models = GSON.fromJson(body, JsonArray.class);
+            final JsonObject responseObj = GSON.fromJson(body, JsonObject.class);
+            if (responseObj == null || !responseObj.has("models"))
+            {
+                log.warn("Models endpoint response missing 'models' key. Retaining previous cache.");
+                return;
+            }
+            final JsonArray models = responseObj.getAsJsonArray("models");
             if (models == null || models.isEmpty())
             {
-                log.error("Models endpoint returned empty array. Retaining previous cache.");
+                log.info("Models endpoint returned empty models array. Clearing cache (data collection mode).");
+                cache.clear();
                 return;
             }
 
@@ -144,11 +160,11 @@ public class ModelRegistryCache
                     continue;
                 }
                 int version = model.get("version").getAsInt();
-                if (!model.has("best_threshold") || model.get("best_threshold").isJsonNull())
+                if (!model.has("anomaly_threshold") || model.get("anomaly_threshold").isJsonNull())
                 {
                     continue;
                 }
-                double threshold = model.get("best_threshold").getAsDouble();
+                double threshold = model.get("anomaly_threshold").getAsDouble();
                 if (Double.isFinite(threshold))
                 {
                     newEntries.put(version, threshold);

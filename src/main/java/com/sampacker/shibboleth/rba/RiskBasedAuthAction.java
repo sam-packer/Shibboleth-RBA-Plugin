@@ -363,7 +363,7 @@ public class RiskBasedAuthAction extends AbstractProfileAction
     /**
      * Resolves the threshold to use for the current request.
      * In dynamic mode (modelsEndpoint set), looks up the threshold from the model cache.
-     * Falls back to failureThreshold or fail-open (0.0) if no threshold is available.
+     * An empty cache means no trained model exists (data collection mode) — allow login.
      */
     private double resolveThreshold(Integer modelVersion)
     {
@@ -373,39 +373,42 @@ public class RiskBasedAuthAction extends AbstractProfileAction
             return failureThreshold;
         }
 
-        // Dynamic mode: try to resolve from cache
-        Double threshold = null;
+        // Data collection mode: cache is configured but empty (no trained models)
+        if (modelCache.isEmpty())
+        {
+            log.info("Model cache is empty (data collection mode). Allowing login.");
+            return Double.MAX_VALUE;
+        }
 
+        // Dynamic mode with modelVersion present in score response
         if (modelVersion != null)
         {
-            threshold = modelCache.getThreshold(modelVersion);
-            if (threshold == null)
+            Double threshold = modelCache.getThreshold(modelVersion);
+            if (threshold != null)
             {
-                // Cache miss for this version - trigger async refresh and use latest
-                log.debug("No cached threshold for modelVersion={}. Triggering async refresh.", modelVersion);
-                modelCache.triggerAsyncRefresh();
-                threshold = modelCache.getLatestThreshold();
+                return threshold;
             }
-        }
-        else
-        {
-            threshold = modelCache.getLatestThreshold();
+
+            // Cache miss — refresh synchronously and retry
+            log.debug("No cached threshold for modelVersion={}. Refreshing cache synchronously.", modelVersion);
+            modelCache.refreshNow();
+
+            threshold = modelCache.getThreshold(modelVersion);
+            if (threshold != null)
+            {
+                return threshold;
+            }
+
+            // Still not found after refresh — allow login
+            log.warn("modelVersion={} not found in cache after refresh. Allowing login.", modelVersion);
+            return Double.MAX_VALUE;
         }
 
-        if (threshold != null)
-        {
-            return threshold;
-        }
-
-        // Cache is empty - fall back to static threshold if configured
+        // No modelVersion in response (MLFlow disabled, local model)
         if (failureThreshold > 0)
         {
-            log.warn("Model cache is empty. Falling back to static failureThreshold={}.", failureThreshold);
             return failureThreshold;
         }
-
-        // No threshold available at all - fail open
-        log.error("No threshold available from model cache or static config. Failing open.");
         return Double.MAX_VALUE;
     }
 

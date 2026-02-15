@@ -199,7 +199,7 @@
                 input_focus_count: inputFocusCount,
                 paste_events: pasteCount,
                 resize_events: resizeCount,
-                metrics_version: 4,
+                metrics_version: 1,
                 collection_timestamp: new Date().toISOString(),
                 ...env,
             };

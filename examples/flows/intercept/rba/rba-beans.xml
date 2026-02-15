@@ -6,9 +6,10 @@
          http://www.springframework.org/schema/beans https://www.springframework.org/schema/beans/spring-beans.xsd">
 
     <!-- Use this setup if you are using MLFlow (highly recommended).
-     The threshold is automatically fetched from the /models endpoint and ensures
-     fair scoring regardless of model version. When modelsEndpoint is set, the plugin
-     dynamically resolves the threshold per model version. -->
+     The anomaly detection threshold is automatically fetched from the /models endpoint.
+     When modelsEndpoint is set, the plugin dynamically resolves the threshold per model
+     version. If no trained model exists yet, the plugin enters data collection mode
+     and allows logins through. -->
     <bean id="rbaAction"
           class="com.sampacker.shibboleth.rba.RiskBasedAuthAction"
           init-method="initialize"

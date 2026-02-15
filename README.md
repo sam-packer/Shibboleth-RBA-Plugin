@@ -1,8 +1,8 @@
 # Shibboleth IdP RBA Plugin
 
-A plugin for Shibboleth IdP that forwards requests to a Flask API for threat analysis. The Flask server will use a
-trained neural network model to assign a score based on how high risk it believes the login will be. The plugin will get
-the response and either allow / deny the login.
+A plugin for Shibboleth IdP that forwards requests to a Flask API for threat analysis. The Flask server uses metric
+learning with anomaly detection to assign a score based on how risky it believes the login is. The plugin will get the
+response and either allow / deny the login.
 
 This plugin was tested on Shibboleth IdP 5.1.6.
 
@@ -115,7 +115,9 @@ are able to customize the flow however you desire.
 
 The `rba-beans.xml` file supports two configuration modes:
 
-1. **MLFlow mode (recommended):** Uses dynamic threshold from your MLFlow server
+1. **MLFlow mode (recommended):** Fetches the anomaly detection threshold dynamically from the `/models` endpoint. The
+   plugin resolves the threshold per model version. If no trained model exists yet, the plugin enters data collection
+   mode and allows logins through until a model is trained.
 2. **Manual threshold mode:** Hardcoded threshold value (not recommended for production)
 
 See the example file for both configurations.
@@ -165,8 +167,8 @@ A successful authentication should look like this (or similar, depending on your
 ```
 INFO [net.shibboleth.idp.authn.impl.FinalizeAuthentication:201] - Profile Action FinalizeAuthentication: Principal sam authenticated
 INFO [com.sampacker.shibboleth.rba.RiskBasedAuthAction:88] - Starting RBA check for user='sam', ip='<redacted>'
-INFO [com.sampacker.shibboleth.rba.RiskBasedAuthAction:140] - RBA score=0.0305283652305603, idpThreshold=0.7
-INFO [com.sampacker.shibboleth.rba.RiskBasedAuthAction:146] - RBA: emitting event='proceed' ctxClass=org.opensaml.profile.context.EventContext ctxHash=1532931382
+INFO [com.sampacker.shibboleth.rba.RiskBasedAuthAction:140] - RBA score=0.0305283652305603, resolvedThreshold=0.7, modelVersion=1
+INFO [com.sampacker.shibboleth.rba.RiskBasedAuthAction:146] - RBA: emitting event='proceed'
 ```
 
 ## Troubleshooting
